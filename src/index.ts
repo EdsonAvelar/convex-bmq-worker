@@ -349,29 +349,38 @@ function createHealthServer(port: number = 3001) {
         try {
           const data = JSON.parse(body);
 
-          // Validação básica
-          if (!data.tenantId || !data.webhookUrl) {
+          // Validação básica conforme WebhookJobData
+          if (
+            !data.tenantId ||
+            !data.integrationId ||
+            !data.url ||
+            !data.method
+          ) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(
               JSON.stringify({
-                error: "Missing required fields: tenantId, webhookUrl",
+                error:
+                  "Missing required fields: tenantId, integrationId, url, method",
               })
             );
             return;
           }
 
-          // Adicionar job na fila
+          // Adicionar job na fila com estrutura WebhookJobData
           const { Queue } = await import("bullmq");
           const redis = getRedisSingleton();
           const queue = new Queue("webhooks", { connection: redis });
 
           const job = await queue.add("webhook", {
             tenantId: data.tenantId,
-            webhookUrl: data.webhookUrl,
-            payload: data.payload || {},
+            integrationId: data.integrationId,
+            integrationName: data.integrationName || "Webhook",
+            negocioId: data.negocioId,
+            url: data.url, // ✅ Corrigido: webhookUrl → url
+            method: data.method,
             headers: data.headers || {},
+            body: data.body || {}, // ✅ Corrigido: payload → body
             timestamp: new Date().toISOString(),
-            metadata: data.metadata || {},
           });
 
           await queue.close();
@@ -384,7 +393,8 @@ function createHealthServer(port: number = 3001) {
               event: "webhook_job_added",
               job_id: job.id,
               tenant_id: data.tenantId,
-              webhook_url: data.webhookUrl,
+              integration_id: data.integrationId,
+              webhook_url: data.url,
             })
           );
 

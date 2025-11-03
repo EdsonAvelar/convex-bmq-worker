@@ -3,6 +3,7 @@
 ## Endpoints Disponíveis
 
 ### 1. Health Check
+
 ```bash
 # Verificar se o worker está saudável
 curl http://localhost:3002/health
@@ -26,22 +27,28 @@ curl http://localhost:3002/health
 ```
 
 ### 2. Adicionar Job de Webhook (POST)
+
 ```bash
 # Adicionar um job na fila
 curl -X POST http://localhost:3002/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "tenantId": 1,
-    "webhookUrl": "https://webhook.site/unique-id",
-    "payload": {
+    "integrationId": 5,
+    "integrationName": "Webhook User Created",
+    "negocioId": 12345,
+    "url": "https://webhook.site/unique-id",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-Custom-Header": "value"
+    },
+    "body": {
       "event": "user.created",
       "data": {
         "id": 123,
         "email": "user@example.com"
       }
-    },
-    "headers": {
-      "X-Custom-Header": "value"
     }
   }'
 
@@ -54,6 +61,7 @@ curl -X POST http://localhost:3002/webhooks \
 ```
 
 ### 3. Estatísticas da Fila (GET)
+
 ```bash
 # Ver status da fila
 curl http://localhost:3002/webhooks/stats
@@ -75,23 +83,32 @@ curl http://localhost:3002/webhooks/stats
 ## Testando o Worker
 
 ### 1. Inicie o Docker Compose
+
 ```bash
 docker-compose up --build
 ```
 
 ### 2. Verifique o Health
+
 ```bash
 curl http://localhost:3002/health
 ```
 
 ### 3. Adicione um Job de Teste
+
 ```bash
 curl -X POST http://localhost:3002/webhooks \
   -H "Content-Type: application/json" \
   -d '{
     "tenantId": 1,
-    "webhookUrl": "https://webhook.site/your-unique-id",
-    "payload": {
+    "integrationId": 999,
+    "integrationName": "Teste Webhook",
+    "url": "https://webhook.site/your-unique-id",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
       "event": "test.event",
       "message": "Hello from BullMQ!"
     }
@@ -99,6 +116,7 @@ curl -X POST http://localhost:3002/webhooks \
 ```
 
 ### 4. Monitore os Logs
+
 ```bash
 # Logs do worker em tempo real
 docker-compose logs -f worker
@@ -110,6 +128,7 @@ docker-compose logs -f worker
 ```
 
 ### 5. Verifique as Estatísticas
+
 ```bash
 curl http://localhost:3002/webhooks/stats
 ```
@@ -117,13 +136,14 @@ curl http://localhost:3002/webhooks/stats
 ## Exemplo de Integração Next.js
 
 ### API Route (app/api/webhooks/route.ts)
+
 ```typescript
 import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    
+
     // Enviar para o worker BullMQ
     const response = await fetch('http://worker:3002/webhooks', {
       method: 'POST',
@@ -132,14 +152,18 @@ export async function POST(req: NextRequest) {
       },
       body: JSON.stringify({
         tenantId: body.tenantId,
-        webhookUrl: body.webhookUrl,
-        payload: body.payload,
+        integrationId: body.integrationId,
+        integrationName: body.integrationName,
+        negocioId: body.negocioId,
+        url: body.url,
+        method: body.method || 'POST',
         headers: body.headers || {},
+        body: body.body || {},
       }),
     });
 
     const data = await response.json();
-    
+
     if (!response.ok) {
       return NextResponse.json(
         { error: data.error || 'Failed to queue webhook' },
@@ -159,6 +183,7 @@ export async function POST(req: NextRequest) {
 ```
 
 ### Client Component (components/WebhookTester.tsx)
+
 ```typescript
 'use client';
 
@@ -183,7 +208,7 @@ export default function WebhookTester() {
           },
         }),
       });
-      
+
       const data = await response.json();
       setResult(data);
     } catch (error) {
@@ -202,7 +227,7 @@ export default function WebhookTester() {
       >
         {loading ? 'Enviando...' : 'Testar Webhook'}
       </button>
-      
+
       {result && (
         <pre className="mt-4 p-4 bg-gray-100 rounded">
           {JSON.stringify(result, null, 2)}
@@ -251,16 +276,19 @@ services:
 ## Endpoints para Monitoramento
 
 ### Redis Status
+
 ```bash
 curl http://localhost:3002/redis
 ```
 
 ### Readiness (K8s/Railway)
+
 ```bash
 curl http://localhost:3002/ready
 ```
 
 ### Liveness (K8s/Railway)
+
 ```bash
 curl http://localhost:3002/live
 ```
@@ -310,6 +338,7 @@ curl -X POST http://localhost:3002/webhooks \
 ## Troubleshooting
 
 ### Worker não processa jobs
+
 ```bash
 # Verificar logs
 docker-compose logs -f worker
@@ -322,11 +351,13 @@ curl http://localhost:3002/health
 ```
 
 ### Jobs ficam em "waiting"
+
 - Verifique se o worker está rodando: `docker-compose ps`
 - Verifique logs de erro: `docker-compose logs worker | grep error`
 - Verifique conexão Redis: `curl http://localhost:3002/redis`
 
 ### Jobs falhando
+
 ```bash
 # Ver estatísticas
 curl http://localhost:3002/webhooks/stats

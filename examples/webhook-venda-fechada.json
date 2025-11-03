@@ -1,0 +1,24 @@
+{
+  "tenantId": 1,
+  "integrationId": 5,
+  "integrationName": "Webhook Fechamento Venda",
+  "negocioId": 12345,
+  "url": "https://erp-cliente.com/api/convex/venda-fechada",
+  "method": "POST",
+  "headers": {
+    "Content-Type": "application/json",
+    "X-Event-Type": "venda.fechada",
+    "Authorization": "Bearer token-do-cliente"
+  },
+  "body": {
+    "event": "venda.fechada",
+    "timestamp": "2025-11-03T20:30:00.000Z",
+    "data": {
+      "negocioId": 12345,
+      "cliente": "João Silva Santos",
+      "valor": 15000.0,
+      "vendedor": "Maria Santos Oliveira",
+      "status": "FECHADA"
+    }
+  }
+}
