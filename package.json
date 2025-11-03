@@ -9,7 +9,12 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "health": "curl http://localhost:3001/health",
-    "test:load": "node scripts/test-load.js"
+    "test:load": "node scripts/test-load.js",
+    "test:queue": "tsx scripts/test-queue.ts",
+    "queue:stats": "tsx scripts/queue-stats.ts",
+    "queue:stats:watch": "tsx scripts/queue-stats.ts --watch",
+    "queue:clean": "tsx scripts/queue-clean.ts",
+    "queue:clean:all": "tsx scripts/queue-clean.ts --all"
   },
   "keywords": [
     "bullmq",

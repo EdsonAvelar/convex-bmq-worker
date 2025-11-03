@@ -85,7 +85,7 @@ INTERNAL_API_SECRET=your_super_secret_token_here
 
 # Worker Config
 NODE_ENV=production
-PORT=3001
+PORT=3002
 WORKER_CONCURRENCY=5
 WORKER_LOCK_DURATION=120000
 ```
@@ -113,7 +113,7 @@ npm start
 
 ```bash
 # Em outro terminal
-curl http://localhost:3001/health
+curl http://localhost:3002/health
 
 # Resposta esperada:
 {
@@ -150,7 +150,7 @@ curl http://localhost:3001/health
      APP_URL=https://your-app.vercel.app
      INTERNAL_API_SECRET=your_super_secret_token_here
      NODE_ENV=production
-     PORT=3001
+     PORT=3002
      ```
 
 4. **Deploy automático**:
@@ -252,7 +252,7 @@ npm run test:load
 | `APP_URL`                  | ✅          | -            | URL do Next.js (Vercel)             |
 | `INTERNAL_API_SECRET`      | ✅          | -            | Secret compartilhado (min 32 chars) |
 | `NODE_ENV`                 | ❌          | `production` | Ambiente de execução                |
-| `PORT`                     | ❌          | `3001`       | Porta do health server              |
+| `PORT`                     | ❌          | `3002`       | Porta do health server              |
 | `WORKER_CONCURRENCY`       | ❌          | `5`          | Jobs simultâneos                    |
 | `WORKER_LOCK_DURATION`     | ❌          | `120000`     | Lock duration em ms                 |
 | `TZ`                       | ❌          | `UTC`        | Timezone                            |
@@ -343,7 +343,7 @@ railway logs --follow
 # Verificar se porta está exposta
 railway logs | grep "Health server listening"
 
-# Deve mostrar: "Health server listening on port 3001"
+# Deve mostrar: "Health server listening on port 3002"
 ```
 
 ### Jobs não processam
@@ -414,6 +414,5 @@ MIT License - veja arquivo LICENSE para detalhes
 **Criado por**: Convex Team  
 **Última atualização**: 03/11/2025  
 **Versão**: 1.0.0
-
 
 docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' redis
