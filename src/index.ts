@@ -1,16 +1,24 @@
 /**
  * BullMQ Worker Standalone Process
- * 
+ *
  * Processo independente responsável por consumir jobs das filas BullMQ.
  * Deployável em Railway, VPS, Render, Fly.io ou qualquer container runtime.
- * 
+ *
  * @author Convex Team
  * @version 1.0.0
  */
 
 import http from "http";
-import { startWebhookWorker, stopWebhookWorker, webhookWorker } from "./lib/queue/webhookWorker";
-import { closeRedisConnection } from "./lib/queue/connection";
+import {
+  startWebhookWorker,
+  stopWebhookWorker,
+  webhookWorker,
+} from "./lib/queue/webhookWorker";
+import {
+  getRedisSingleton,
+  waitForReady,
+  pingRedisSafe,
+} from "./lib/queue/connection";
 
 // ============================================================================
 // Global State
@@ -19,29 +27,6 @@ import { closeRedisConnection } from "./lib/queue/connection";
 const startTime = Date.now();
 let isShuttingDown = false;
 let healthServer: http.Server | null = null;
-
-// ============================================================================
-// Logging
-// ============================================================================
-
-function log(level: "info" | "warn" | "error", message: string, meta?: any) {
-  const timestamp = new Date().toISOString();
-  const logData = {
-    timestamp,
-    level,
-    service: "bullmq-worker",
-    message,
-    ...meta,
-  };
-
-  if (level === "error") {
-    console.error(JSON.stringify(logData));
-  } else if (level === "warn") {
-    console.warn(JSON.stringify(logData));
-  } else {
-    console.log(JSON.stringify(logData));
-  }
-}
 
 // ============================================================================
 // Health & Metrics
@@ -56,21 +41,62 @@ interface HealthStatus {
       paused: boolean;
     };
   };
+  redis: {
+    connected: boolean;
+    rtt_ms?: number;
+  };
   timestamp: string;
 }
 
 async function getHealthStatus(): Promise<HealthStatus> {
-  const isActive = await webhookWorker.isActive();
-  const isPaused = await webhookWorker.isPaused();
+  const isActive = webhookWorker?.isActive() || false;
+  const isPaused = webhookWorker ? await webhookWorker.isPaused() : true;
+
+  // ✅ Verificação real do Redis usando singleton
+  let redisConnected = false;
+  let redisRtt: number | undefined;
+
+  try {
+    const redis = getRedisSingleton();
+    const startPing = Date.now();
+    await pingRedisSafe(redis, 1500);
+    redisRtt = Date.now() - startPing;
+    redisConnected = true;
+  } catch (error: any) {
+    console.error(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        service: "health-check",
+        event: "redis_ping_failed",
+        error: error.message,
+      })
+    );
+    redisConnected = false;
+  }
+
+  // Determinar status geral
+  let status: "healthy" | "degraded" | "unhealthy";
+  if (isShuttingDown) {
+    status = "unhealthy";
+  } else if (redisConnected && isActive) {
+    status = "healthy";
+  } else {
+    status = "degraded";
+  }
 
   return {
-    status: isShuttingDown ? "unhealthy" : isActive ? "healthy" : "degraded",
+    status,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     workers: {
       webhook: {
         active: isActive,
         paused: isPaused,
       },
+    },
+    redis: {
+      connected: redisConnected,
+      rtt_ms: redisRtt,
     },
     timestamp: new Date().toISOString(),
   };
@@ -89,15 +115,46 @@ function createHealthServer(port: number = 3001) {
       return;
     }
 
-    // Health endpoint
-    if (req.url === "/health" && req.method === "GET") {
+    // Normalize URL path (ignore trailing slash and query params)
+    const urlObj = new URL(req.url || "/", "http://localhost");
+    const path = urlObj.pathname.replace(/\/$/, "");
+
+    // Health endpoint - ✅ Verificação real Redis + Worker
+    if (path === "/health" && req.method === "GET") {
       try {
         const health = await getHealthStatus();
-        const statusCode = health.status === "healthy" ? 200 : 503;
+        // ✅ Retorna 200 apenas se Redis responder PONG e worker estiver ativo
+        const statusCode =
+          health.status === "healthy" && health.redis.connected ? 200 : 503;
 
         res.writeHead(statusCode, { "Content-Type": "application/json" });
         res.end(JSON.stringify(health, null, 2));
+
+        // Log estruturado do health check
+        console.log(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: statusCode === 200 ? "info" : "warn",
+            service: "health-server",
+            event: "health_check",
+            status: health.status,
+            http_status: statusCode,
+            redis_connected: health.redis.connected,
+            redis_rtt_ms: health.redis.rtt_ms,
+            worker_active: health.workers.webhook.active,
+          })
+        );
       } catch (error) {
+        console.error(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "error",
+            service: "health-server",
+            event: "health_check_error",
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
+
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -109,8 +166,47 @@ function createHealthServer(port: number = 3001) {
       return;
     }
 
+    // Redis ping diagnostics - ✅ Usando função pingRedisSafe robusta
+    if (path === "/redis" && req.method === "GET") {
+      try {
+        const redis = getRedisSingleton();
+        const startPing = Date.now();
+        await pingRedisSafe(redis, 1500);
+        const rttMs = Date.now() - startPing;
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            redis: "ok",
+            rtt_ms: rttMs,
+            timestamp: new Date().toISOString(),
+          })
+        );
+      } catch (error: any) {
+        console.error(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "error",
+            service: "health-server",
+            event: "redis_diagnostic_failed",
+            error: error.message,
+          })
+        );
+
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            redis: "fail",
+            error: error.message,
+            timestamp: new Date().toISOString(),
+          })
+        );
+      }
+      return;
+    }
+
     // Readiness endpoint (Railway/K8s)
-    if (req.url === "/ready" && req.method === "GET") {
+    if (path === "/ready" && req.method === "GET") {
       try {
         const health = await getHealthStatus();
         const isReady = health.status === "healthy" && !isShuttingDown;
@@ -127,7 +223,7 @@ function createHealthServer(port: number = 3001) {
     }
 
     // Liveness endpoint (Railway/K8s)
-    if (req.url === "/live" && req.method === "GET") {
+    if (path === "/live" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ alive: true }));
       return;
@@ -135,56 +231,192 @@ function createHealthServer(port: number = 3001) {
 
     // 404
     res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Not found" }));
+    res.end(JSON.stringify({ error: "Not found", path, method: req.method }));
   });
 
   server.listen(port, () => {
-    log("info", `Health server listening on port ${port}`, {
-      endpoints: ["/health", "/ready", "/live"],
-    });
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "health-server",
+        event: "server_listening",
+        port,
+        endpoints: ["/health", "/ready", "/live", "/redis"],
+      })
+    );
   });
 
   return server;
 }
 
 // ============================================================================
-// Graceful Shutdown
+// Graceful Shutdown - ✅ Robusto e completo
 // ============================================================================
 
 async function gracefulShutdown(signal: string) {
   if (isShuttingDown) {
-    log("warn", "Shutdown already in progress, forcing exit...");
-    process.exit(1);
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        service: "main",
+        event: "shutdown_already_in_progress",
+        signal,
+      })
+    );
+
+    // Force exit após 10s se já está fazendo shutdown
+    setTimeout(() => {
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "main",
+          event: "force_exit",
+          reason: "shutdown_timeout",
+        })
+      );
+      process.exit(1);
+    }, 10000);
+    return;
   }
 
   isShuttingDown = true;
-  log("info", `Received ${signal}, starting graceful shutdown...`);
+
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "info",
+      service: "main",
+      event: "graceful_shutdown_started",
+      signal,
+      uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
+    })
+  );
+
+  // Timeout global para shutdown (30s máximo)
+  const shutdownTimeout = setTimeout(() => {
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        service: "main",
+        event: "shutdown_timeout",
+        timeout_seconds: 30,
+      })
+    );
+    process.exit(1);
+  }, 30000);
 
   try {
-    // 1. Parar workers (aguardar jobs completarem)
-    log("info", "Stopping webhook worker...");
+    // 1. Parar de aceitar novos health checks como "healthy"
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "health_checks_degraded",
+      })
+    );
+
+    // 2. Parar workers (aguardar jobs completarem)
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "stopping_workers",
+      })
+    );
+
     await stopWebhookWorker();
 
-    // 2. Fechar conexões
-    log("info", "Closing Redis connection...");
-    await closeRedisConnection();
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "workers_stopped",
+      })
+    );
 
-    // 3. Fechar health server
+    // 3. Fechar conexões Redis (singleton compartilhada)
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "closing_redis_connections",
+      })
+    );
+
+    // ✅ Fechar singleton Redis
+    const redis = getRedisSingleton();
+    await redis.quit().catch((err) => {
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "main",
+          event: "redis_close_error",
+          error: err.message,
+        })
+      );
+    });
+
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "redis_connections_closed",
+      })
+    );
+
+    // 4. Fechar health server
     if (healthServer) {
       await new Promise<void>((resolve) => {
         healthServer!.close(() => {
-          log("info", "Health server closed");
+          console.log(
+            JSON.stringify({
+              timestamp: new Date().toISOString(),
+              level: "info",
+              service: "main",
+              event: "health_server_closed",
+            })
+          );
           resolve();
         });
       });
     }
 
-    log("info", "Graceful shutdown completed successfully");
+    clearTimeout(shutdownTimeout);
+
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "graceful_shutdown_completed",
+        total_uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
+      })
+    );
+
     process.exit(0);
   } catch (error) {
-    log("error", "Error during graceful shutdown", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+    clearTimeout(shutdownTimeout);
+
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        service: "main",
+        event: "shutdown_error",
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
+
     process.exit(1);
   }
 }
@@ -194,67 +426,197 @@ async function gracefulShutdown(signal: string) {
 // ============================================================================
 
 async function main() {
-  log("info", "Starting BullMQ Worker Process", {
-    nodeVersion: process.version,
-    platform: process.platform,
-    env: process.env.NODE_ENV || "production",
-  });
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "info",
+      service: "main",
+      event: "worker_process_starting",
+      node_version: process.version,
+      platform: process.platform,
+      environment: process.env.NODE_ENV || "production",
+      pid: process.pid,
+    })
+  );
 
   try {
-    // 1. Verificar variáveis de ambiente
-    const requiredEnvs = [
-      "UPSTASH_REDIS_REST_URL",
-      "UPSTASH_REDIS_REST_TOKEN",
-      "INTERNAL_API_SECRET",
-      "APP_URL",
-    ];
+    // 1. Verificar variáveis de ambiente obrigatórias
+    const requiredEnvs = ["INTERNAL_API_SECRET"];
 
-    const missingEnvs = requiredEnvs.filter((env) => !process.env[env]);
-    if (missingEnvs.length > 0) {
-      throw new Error(
-        `Missing required environment variables: ${missingEnvs.join(", ")}`
+    const appUrl = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL;
+    if (!appUrl) {
+      requiredEnvs.push("APP_URL ou NEXT_PUBLIC_APP_URL");
+    }
+
+    const hasTcpRedis = Boolean(
+      process.env.UPSTASH_REDIS_URL || process.env.REDIS_URL
+    );
+    const hasRestRedis = Boolean(
+      process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+    );
+
+    if (!hasTcpRedis && !hasRestRedis) {
+      requiredEnvs.push(
+        "UPSTASH_REDIS_URL/REDIS_URL ou UPSTASH_REDIS_REST_URL+UPSTASH_REDIS_REST_TOKEN"
       );
     }
 
-    // 2. Inicializar workers
-    log("info", "Initializing webhook worker...");
+    for (const env of requiredEnvs) {
+      if (env.includes("ou ") || !process.env[env as keyof NodeJS.ProcessEnv]) {
+        throw new Error(`Missing required environment variable: ${env}`);
+      }
+    }
+
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "environment_validated",
+        redis_source: hasTcpRedis ? "tcp_url" : "rest_derived",
+        app_url: appUrl,
+      })
+    );
+
+    // 2. Testar conectividade com Redis (PING)
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "testing_redis_connectivity",
+      })
+    );
+
+    // ✅ Usar singleton + waitForReady + pingRedisSafe
+    const redis = getRedisSingleton();
+    await waitForReady(redis, 5000);
+
+    const startPing = Date.now();
+    await pingRedisSafe(redis, 1500);
+    const rttMs = Date.now() - startPing;
+
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "redis_connectivity_verified",
+        rtt_ms: rttMs,
+      })
+    );
+
+    // 3. Inicializar workers
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "initializing_workers",
+      })
+    );
+
     startWebhookWorker();
     await webhookWorker.waitUntilReady();
-    log("info", "Webhook worker ready");
 
-    // 3. Iniciar health server
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "workers_ready",
+      })
+    );
+
+    // 4. Iniciar health server
     const port = parseInt(process.env.PORT || "3001", 10);
     healthServer = createHealthServer(port);
 
-    // 4. Signal handlers
-    process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-    process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+    // 5. ✅ Signal handlers robustos
+    process.on("SIGTERM", () => {
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          service: "main",
+          event: "signal_received",
+          signal: "SIGTERM",
+        })
+      );
+      gracefulShutdown("SIGTERM");
+    });
 
-    // 5. Error handlers
+    process.on("SIGINT", () => {
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          service: "main",
+          event: "signal_received",
+          signal: "SIGINT",
+        })
+      );
+      gracefulShutdown("SIGINT");
+    });
+
+    // 6. ✅ Error handlers robustos
     process.on("uncaughtException", (error) => {
-      log("error", "Uncaught exception", {
-        error: error.message,
-        stack: error.stack,
-      });
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "main",
+          event: "uncaught_exception",
+          error: error.message,
+          stack: error.stack?.split("\n").slice(0, 10).join(" | "),
+        })
+      );
       gracefulShutdown("uncaughtException");
     });
 
     process.on("unhandledRejection", (reason) => {
-      log("error", "Unhandled rejection", {
-        reason: reason instanceof Error ? reason.message : String(reason),
-      });
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "main",
+          event: "unhandled_rejection",
+          reason: reason instanceof Error ? reason.message : String(reason),
+          stack:
+            reason instanceof Error
+              ? reason.stack?.split("\n").slice(0, 10).join(" | ")
+              : undefined,
+        })
+      );
       gracefulShutdown("unhandledRejection");
     });
 
-    log("info", "✅ BullMQ Worker Process started successfully", {
-      workers: ["webhook"],
-      healthPort: port,
-    });
+    // 7. Success log
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "main",
+        event: "worker_process_ready",
+        workers: ["webhook"],
+        health_port: port,
+        uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
+      })
+    );
   } catch (error) {
-    log("error", "Failed to start worker process", {
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined,
-    });
+    console.error(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        service: "main",
+        event: "startup_failed",
+        error: error instanceof Error ? error.message : String(error),
+        stack:
+          error instanceof Error
+            ? error.stack?.split("\n").slice(0, 10).join(" | ")
+            : undefined,
+      })
+    );
     process.exit(1);
   }
 }
@@ -264,6 +626,18 @@ async function main() {
 // ============================================================================
 
 main().catch((error) => {
-  console.error("Fatal error:", error);
+  console.error(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "error",
+      service: "main",
+      event: "bootstrap_error",
+      error: error instanceof Error ? error.message : String(error),
+      stack:
+        error instanceof Error
+          ? error.stack?.split("\n").slice(0, 10).join(" | ")
+          : undefined,
+    })
+  );
   process.exit(1);
 });

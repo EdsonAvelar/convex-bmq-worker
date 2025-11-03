@@ -18,7 +18,57 @@ export interface WebhookJobData {
 }
 
 /**
- * Salva log de webhook via API interna (seguro - não acessa banco diretamente)
+ * Circuit Breaker simples para webhooks
+ */
+class WebhookCircuitBreaker {
+  private failures = 0;
+  private successes = 0;
+  private lastFailureTime = 0;
+  private readonly threshold = 5; // 5 falhas consecutivas para abrir
+  private readonly timeout = 60000; // 1 minuto de pausa
+  private readonly resetSuccesses = 3; // 3 sucessos para resetar contador
+
+  isOpen(): boolean {
+    if (this.failures >= this.threshold) {
+      if (Date.now() - this.lastFailureTime < this.timeout) {
+        return true; // Circuit aberto (pausado)
+      } else {
+        // Timeout passou, tentar novamente
+        this.failures = Math.max(0, this.failures - 1);
+      }
+    }
+    return false;
+  }
+
+  recordSuccess(): void {
+    this.successes++;
+    if (this.successes >= this.resetSuccesses) {
+      this.failures = 0;
+      this.successes = 0;
+    }
+  }
+
+  recordFailure(): void {
+    this.failures++;
+    this.successes = 0;
+    this.lastFailureTime = Date.now();
+  }
+
+  getStats() {
+    return {
+      failures: this.failures,
+      successes: this.successes,
+      isOpen: this.isOpen(),
+      lastFailureTime: this.lastFailureTime,
+    };
+  }
+}
+
+// Circuit breaker global para webhooks
+const circuitBreaker = new WebhookCircuitBreaker();
+
+/**
+ * Salva log de webhook via API interna com timeout robusto e AbortController
  */
 async function saveWebhookLog(logData: {
   integrationId: number;
@@ -38,16 +88,40 @@ async function saveWebhookLog(logData: {
   const apiSecret = process.env.INTERNAL_API_SECRET;
 
   if (!apiUrl) {
-    console.error("❌ [saveWebhookLog] APP_URL não configurada - log não será salvo");
+    console.error(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        service: "webhook-logger",
+        event: "missing_app_url",
+        tenant_id: logData.tenantId,
+        integration_id: logData.integrationId,
+      })
+    );
     return;
   }
 
   if (!apiSecret) {
-    console.error("❌ [saveWebhookLog] INTERNAL_API_SECRET não configurada - log não será salvo");
+    console.error(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        service: "webhook-logger",
+        event: "missing_api_secret",
+        tenant_id: logData.tenantId,
+        integration_id: logData.integrationId,
+      })
+    );
     return;
   }
 
+  // ✅ AbortController com timeout 5s
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+
   try {
+    const startTime = Date.now();
+
     const response = await fetch(`${apiUrl}/api/internal/webhook-logs`, {
       method: "POST",
       headers: {
@@ -55,40 +129,73 @@ async function saveWebhookLog(logData: {
         "x-internal-secret": apiSecret,
       },
       body: JSON.stringify(logData),
-      signal: AbortSignal.timeout(5000), // 5s timeout
+      signal: controller.signal,
     });
+
+    clearTimeout(timeoutId);
+    const duration = Date.now() - startTime;
 
     if (!response.ok) {
       const errorText = await response.text();
       console.error(
-        `❌ [saveWebhookLog] API retornou erro ${response.status}: ${errorText}`
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "webhook-logger",
+          event: "api_error",
+          tenant_id: logData.tenantId,
+          integration_id: logData.integrationId,
+          api_status: response.status,
+          api_error: errorText,
+          duration_ms: duration,
+        })
       );
       return;
     }
 
-    console.log("✅ [saveWebhookLog] Log salvo via API com sucesso");
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "webhook-logger",
+        event: "log_saved",
+        tenant_id: logData.tenantId,
+        integration_id: logData.integrationId,
+        duration_ms: duration,
+      })
+    );
   } catch (error: any) {
+    clearTimeout(timeoutId);
+
+    const errorType = error.name === "AbortError" ? "timeout" : "network_error";
+
     console.error(
-      `❌ [saveWebhookLog] Erro ao chamar API:`,
-      error.message
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        service: "webhook-logger",
+        event: errorType,
+        tenant_id: logData.tenantId,
+        integration_id: logData.integrationId,
+        error: error.message,
+      })
     );
   }
 }
 
 /**
- * Worker especializado para processar webhooks
+ * Worker especializado para processar webhooks com resiliência e circuit breaker
  */
 class WebhookWorker extends BaseWorker<WebhookJobData> {
   constructor() {
     super("webhooks", {
-      concurrency: parseInt(process.env.WORKER_CONCURRENCY || "5"),
+      concurrency: parseInt(process.env.WORKER_CONCURRENCY || "10", 10),
       limiter: {
-        max: 5,
+        max: 50, // ✅ Limite mais robusto
         duration: 1000,
       },
-      lockDuration: parseInt(process.env.WORKER_LOCK_DURATION || "120000"),
-      lockRenewTime: 30000,
-      stalledInterval: 60000,
+      lockDuration: 60000, // ✅ 60s lock duration
+      stalledInterval: 30000, // ✅ 30s stalled interval
       maxStalledCount: 2,
     });
   }
@@ -106,15 +213,46 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
     } = job.data;
 
     const attemptNumber = job.attemptsMade + 1;
-    const maxAttempts = job.opts.attempts || 3;
+    const maxAttempts = job.opts.attempts || 5;
+    const jobId = job.id || "unknown";
 
-    console.log(`\n${"=".repeat(80)}`);
-    console.log(`🔄 [WebhookWorker] TENTATIVA ${attemptNumber}/${maxAttempts}`);
-    console.log(`📋 Job ID: ${job.id}`);
-    console.log(`🏢 Tenant: ${tenantId}`);
-    console.log(`🔗 Integração: ${integrationName} (ID: ${integrationId})`);
-    console.log(`🎯 URL: ${url}`);
-    console.log(`${"=".repeat(80)}\n`);
+    // ✅ Verificar circuit breaker
+    if (circuitBreaker.isOpen()) {
+      const stats = circuitBreaker.getStats();
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "webhook-worker",
+          event: "circuit_breaker_open",
+          queue: "webhooks",
+          job_id: jobId,
+          tenant_id: tenantId,
+          integration_id: integrationId,
+          circuit_breaker_stats: stats,
+        })
+      );
+
+      throw new Error(`Circuit breaker is open. Failures: ${stats.failures}`);
+    }
+
+    // Log de início estruturado
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "webhook-worker",
+        event: "webhook_attempt_started",
+        queue: "webhooks",
+        job_id: jobId,
+        tenant_id: tenantId,
+        integration_id: integrationId,
+        integration_name: integrationName,
+        webhook_url: url,
+        attempt: attemptNumber,
+        max_attempts: maxAttempts,
+      })
+    );
 
     const startTime = Date.now();
     let success = false;
@@ -123,7 +261,23 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
     let errorMessage: string | null = null;
 
     try {
-      console.log(`🚀 [WebhookWorker] Enviando requisição HTTP...`);
+      // ✅ AbortController com timeout 12s
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          service: "webhook-worker",
+          event: "http_request_started",
+          job_id: jobId,
+          tenant_id: tenantId,
+          integration_id: integrationId,
+          url,
+          method: method || "POST",
+        })
+      );
 
       const response = await fetch(url, {
         method: method || "POST",
@@ -132,9 +286,10 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
           ...headers,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(30000), // 30s timeout
+        signal: controller.signal,
       });
 
+      clearTimeout(timeoutId);
       statusCode = response.status;
       success = response.ok;
 
@@ -155,20 +310,51 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
       const duration = Date.now() - startTime;
 
       if (success) {
+        // ✅ Registrar sucesso no circuit breaker
+        circuitBreaker.recordSuccess();
+
         console.log(
-          `✅ [WebhookWorker] SUCESSO na tentativa ${attemptNumber}/${maxAttempts}`
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "info",
+            service: "webhook-worker",
+            event: "webhook_success",
+            queue: "webhooks",
+            job_id: jobId,
+            tenant_id: tenantId,
+            integration_id: integrationId,
+            webhook_url: url,
+            http_status: statusCode,
+            duration_ms: duration,
+            attempt: attemptNumber,
+            max_attempts: maxAttempts,
+          })
         );
-        console.log(`📊 Status: ${statusCode}`);
-        console.log(`⏱️ Tempo: ${duration}ms`);
       } else {
-        console.log(
-          `❌ [WebhookWorker] FALHA na tentativa ${attemptNumber}/${maxAttempts}`
+        // ✅ Registrar falha no circuit breaker
+        circuitBreaker.recordFailure();
+
+        console.error(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "error",
+            service: "webhook-worker",
+            event: "webhook_http_error",
+            queue: "webhooks",
+            job_id: jobId,
+            tenant_id: tenantId,
+            integration_id: integrationId,
+            webhook_url: url,
+            http_status: statusCode,
+            http_status_text: response.statusText,
+            duration_ms: duration,
+            attempt: attemptNumber,
+            max_attempts: maxAttempts,
+          })
         );
-        console.log(`📊 Status: ${statusCode} (${response.statusText})`);
-        console.log(`⏱️ Tempo: ${duration}ms`);
       }
 
-      // Salvar log via API interna (seguro)
+      // Salvar log via API interna
       await saveWebhookLog({
         integrationId,
         negocioId: negocioId || undefined,
@@ -186,8 +372,6 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
         attemptNumber,
       });
 
-      console.log(`💾 [WebhookWorker] Log enviado para API`);
-
       if (!success) {
         throw new Error(`HTTP ${statusCode}: ${response.statusText}`);
       }
@@ -197,38 +381,43 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
       const duration = Date.now() - startTime;
       errorMessage = error.message;
 
+      // ✅ Registrar falha no circuit breaker
+      circuitBreaker.recordFailure();
+
       // Categorizar erro
-      let errorCategory = "ERRO DESCONHECIDO";
+      let errorCategory = "UNKNOWN_ERROR";
       if (error.name === "AbortError" || error.name === "TimeoutError") {
         errorCategory = "TIMEOUT";
       } else if (error.message?.includes("fetch failed")) {
-        errorCategory = "FALHA DE CONEXÃO";
+        errorCategory = "CONNECTION_FAILED";
       } else if (error.message?.includes("ENOTFOUND")) {
-        errorCategory = "DNS NÃO RESOLVIDO";
+        errorCategory = "DNS_ERROR";
       } else if (error.message?.includes("ECONNREFUSED")) {
-        errorCategory = "CONEXÃO RECUSADA";
+        errorCategory = "CONNECTION_REFUSED";
       }
 
-      console.log(`\n${"!".repeat(80)}`);
-      console.log(
-        `❌ [WebhookWorker] ERRO na tentativa ${attemptNumber}/${maxAttempts}`
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "webhook-worker",
+          event: "webhook_error",
+          queue: "webhooks",
+          job_id: jobId,
+          tenant_id: tenantId,
+          integration_id: integrationId,
+          webhook_url: url,
+          error_category: errorCategory,
+          error_message: errorMessage,
+          duration_ms: duration,
+          attempt: attemptNumber,
+          max_attempts: maxAttempts,
+          will_retry: attemptNumber < maxAttempts,
+          circuit_breaker_stats: circuitBreaker.getStats(),
+        })
       );
-      console.log(`🏷️ Categoria: ${errorCategory}`);
-      console.log(`💥 Mensagem: ${errorMessage}`);
-      console.log(`⏱️ Tempo até erro: ${duration}ms`);
 
-      if (attemptNumber < maxAttempts) {
-        const nextDelay = Math.pow(2, attemptNumber) * 2000;
-        console.log(
-          `🔄 RETRY AGENDADO: Próxima tentativa em ${nextDelay}ms`
-        );
-      } else {
-        console.log(`🚫 DESISTINDO: Última tentativa falhou`);
-      }
-
-      console.log(`${"!".repeat(80)}\n`);
-
-      // Salvar erro via API interna (seguro)
+      // Salvar erro via API interna
       await saveWebhookLog({
         integrationId,
         negocioId: negocioId || undefined,
@@ -244,8 +433,6 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
         attemptNumber,
       });
 
-      console.log(`💾 [WebhookWorker] Log de erro enviado para API`);
-
       // Re-throw para BullMQ fazer retry
       throw error;
     }
@@ -257,13 +444,51 @@ export let webhookWorker: WebhookWorker;
 
 export function startWebhookWorker(): WebhookWorker {
   if (!webhookWorker) {
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "webhook-worker",
+        event: "worker_starting",
+      })
+    );
+
     webhookWorker = new WebhookWorker();
+
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "webhook-worker",
+        event: "worker_started",
+        circuit_breaker_stats: circuitBreaker.getStats(),
+      })
+    );
   }
   return webhookWorker;
 }
 
 export async function stopWebhookWorker(): Promise<void> {
   if (webhookWorker) {
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "webhook-worker",
+        event: "worker_stopping",
+        circuit_breaker_stats: circuitBreaker.getStats(),
+      })
+    );
+
     await webhookWorker.stop();
+
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "webhook-worker",
+        event: "worker_stopped",
+      })
+    );
   }
 }

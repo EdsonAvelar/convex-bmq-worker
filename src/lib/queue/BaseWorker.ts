@@ -1,44 +1,132 @@
 // src/lib/queue/BaseWorker.ts
 import { Worker, Job, WorkerOptions } from "bullmq";
-import { getRedisConnection } from "./connection";
+import {
+  getRedisSingleton,
+  createBlockingRedisClient,
+  waitForReady,
+} from "./connection";
 import { BaseJobData } from "./BaseQueue";
+import IORedis from "ioredis";
 
 /**
- * Configuração padrão para todos os workers
+ * Configuração padrão robusta para todos os workers
+ * ✅ Baseada nas melhores práticas de resiliência
  */
 export const DEFAULT_WORKER_OPTIONS: Partial<WorkerOptions> = {
-  connection: getRedisConnection(),
-  concurrency: 5,
+  concurrency: parseInt(process.env.WORKER_CONCURRENCY ?? "10", 10),
   limiter: {
-    max: 10,
+    max: 50,
     duration: 1000,
   },
+  lockDuration: 60000, // 60s - tempo máximo para um job ser processado
+  stalledInterval: 30000, // 30s - intervalo para detectar jobs travados
+  maxStalledCount: 2, // Máximo de jobs travados antes de falhar
+  lockRenewTime: 15000, // 15s - renovar lock a cada 15s
 };
 
 /**
- * Classe base para todos os workers
+ * Classe base para todos os workers com logging estruturado e resiliência
+ * ✅ ATUALIZADA: Usa singleton + blocking client para resolver "Command timed out"
  */
 export abstract class BaseWorker<T extends BaseJobData> {
   protected worker: Worker<T>;
   protected workerName: string;
   private isRunning: boolean = false;
+  private normalClient: IORedis;
+  private blockingClient: IORedis;
 
   constructor(queueName: string, options?: Partial<WorkerOptions>) {
     this.workerName = queueName;
 
+    // ✅ Usar singleton para operações normais + blocking client dedicado
+    this.normalClient = getRedisSingleton();
+    this.blockingClient = createBlockingRedisClient();
+
+    // Log de inicialização estruturado
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "worker",
+        event: "initializing",
+        queue: queueName,
+        options: {
+          concurrency:
+            options?.concurrency || DEFAULT_WORKER_OPTIONS.concurrency,
+          lockDuration:
+            options?.lockDuration || DEFAULT_WORKER_OPTIONS.lockDuration,
+          limiter: options?.limiter || DEFAULT_WORKER_OPTIONS.limiter,
+        },
+        redis_clients: {
+          normal_client: "singleton",
+          blocking_client: "created_with_commandTimeout_0",
+        },
+      })
+    );
+
+    // ✅ Opcional: Aguardar ready explícito antes de processar
+    waitForReady(this.normalClient).catch((err) => {
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "worker",
+          event: "normal_client_ready_failed",
+          queue: queueName,
+          error: err.message,
+        })
+      );
+    });
+
+    waitForReady(this.blockingClient).catch((err) => {
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "worker",
+          event: "blocking_client_ready_failed",
+          queue: queueName,
+          error: err.message,
+        })
+      );
+    });
+
+    // ✅ Usar singleton para connection E blocking client dedicado nas OPTIONS
     this.worker = new Worker<T>(
       queueName,
       async (job: Job<T>) => this.processWithLogging(job),
       {
         ...DEFAULT_WORKER_OPTIONS,
         ...options,
+        connection: this.normalClient, // ✅ Singleton
+        // @ts-ignore - blockingConnection pode não estar tipado em todas as versões
+        blockingConnection: this.blockingClient, // ✅ CRÍTICO: passar nas options
       }
+    );
+
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "worker",
+        event: "blocking_connection_configured",
+        queue: queueName,
+        method: "worker_options",
+      })
     );
 
     this.setupEventListeners();
     this.isRunning = true;
 
-    console.log(`🚀 [Worker:${this.workerName}] Iniciado`);
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "worker",
+        event: "started",
+        queue: this.workerName,
+      })
+    );
   }
 
   /**
@@ -47,16 +135,26 @@ export abstract class BaseWorker<T extends BaseJobData> {
   protected abstract processJob(job: Job<T>): Promise<any>;
 
   /**
-   * Wrapper com logging
+   * Wrapper com logging estruturado e métricas
    */
   private async processWithLogging(job: Job<T>): Promise<any> {
     const startTime = Date.now();
     const { tenantId } = job.data;
+    const jobId = job.id || "unknown";
 
+    // Log de início estruturado
     console.log(
-      `🔄 [Worker:${this.workerName}] Processando job=${
-        job.id
-      }, tenant=${tenantId}, tentativa=${job.attemptsMade + 1}`
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "worker",
+        event: "job_started",
+        queue: this.workerName,
+        job_id: jobId,
+        tenant_id: tenantId,
+        attempt: job.attemptsMade + 1,
+        max_attempts: job.opts.attempts || 3,
+      })
     );
 
     try {
@@ -65,20 +163,42 @@ export abstract class BaseWorker<T extends BaseJobData> {
       }
 
       const result = await this.processJob(job);
-
       const duration = Date.now() - startTime;
 
+      // Log de sucesso estruturado
       console.log(
-        `✅ [Worker:${this.workerName}] Job completado: ${job.id} (${duration}ms, tenant=${tenantId})`
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          service: "worker",
+          event: "job_completed",
+          queue: this.workerName,
+          job_id: jobId,
+          tenant_id: tenantId,
+          duration_ms: duration,
+          attempt: job.attemptsMade + 1,
+        })
       );
 
       return result;
     } catch (error: any) {
       const duration = Date.now() - startTime;
 
+      // Log de erro estruturado
       console.error(
-        `❌ [Worker:${this.workerName}] Job falhou: ${job.id} (${duration}ms, tenant=${tenantId})`,
-        error.message
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "worker",
+          event: "job_failed",
+          queue: this.workerName,
+          job_id: jobId,
+          tenant_id: tenantId,
+          duration_ms: duration,
+          attempt: job.attemptsMade + 1,
+          error: error.message,
+          error_stack: error.stack?.split("\n").slice(0, 5).join(" | "),
+        })
       );
 
       throw error;
@@ -86,18 +206,24 @@ export abstract class BaseWorker<T extends BaseJobData> {
   }
 
   /**
-   * Event listeners
+   * Event listeners com logs estruturados
    */
   private setupEventListeners() {
     this.worker.on("completed", (job) => {
       if (!job) return;
-      const attemptInfo =
-        job.attemptsMade > 0
-          ? ` (após ${job.attemptsMade + 1} tentativa(s))`
-          : "";
 
       console.log(
-        `✅ [Worker:${this.workerName}] Sucesso: ${job.id}${attemptInfo}`
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          service: "worker",
+          event: "job_success",
+          queue: this.workerName,
+          job_id: job.id,
+          tenant_id: job.data.tenantId,
+          attempt: job.attemptsMade + 1,
+          total_attempts: job.opts.attempts || 3,
+        })
       );
     });
 
@@ -107,56 +233,145 @@ export abstract class BaseWorker<T extends BaseJobData> {
       const attemptMsg = `${job.attemptsMade + 1}/${job.opts.attempts || 3}`;
       const willRetry = job.attemptsMade + 1 < (job.opts.attempts || 3);
 
-      console.log(`\n${"═".repeat(80)}`);
-      console.error(`❌ [Worker:${this.workerName}] FAILED: Job ${job.id}`);
-      console.error(`📊 Tentativas: ${attemptMsg}`);
-      console.error(`💥 Erro: ${err.message}`);
+      console.error(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "worker",
+          event: willRetry ? "job_retry" : "job_dead",
+          queue: this.workerName,
+          job_id: job.id,
+          tenant_id: job.data.tenantId,
+          attempt: job.attemptsMade + 1,
+          max_attempts: job.opts.attempts || 3,
+          will_retry: willRetry,
+          error: err.message,
+          error_name: err.name,
+        })
+      );
 
       if (willRetry) {
         const nextAttempt = job.attemptsMade + 2;
         const delay = Math.pow(2, job.attemptsMade + 1) * 2000;
         console.log(
-          `🔄 RETRY em ${delay}ms (tentativa ${nextAttempt}/${
-            job.opts.attempts || 3
-          })`
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "info",
+            service: "worker",
+            event: "retry_scheduled",
+            queue: this.workerName,
+            job_id: job.id,
+            next_attempt: nextAttempt,
+            delay_ms: delay,
+          })
         );
-      } else {
-        console.error(`🚫 FALHA PERMANENTE após ${job.opts.attempts || 3} tentativas`);
       }
-      console.log(`${"═".repeat(80)}\n`);
     });
 
-    this.worker.on("error", (err) => {
+    this.worker.on("error", (err: any) => {
       console.error(
-        `❌ [Worker:${this.workerName}] Erro no worker:`,
-        err.message
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          service: "worker",
+          event: "worker_error",
+          queue: this.workerName,
+          error: err.message,
+          error_name: err.name,
+          command: err.command || null,
+        })
       );
     });
 
     this.worker.on("stalled", (jobId) => {
       console.warn(
-        `⚠️ [Worker:${this.workerName}] Job travado detectado: ${jobId}`
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "warn",
+          service: "worker",
+          event: "job_stalled",
+          queue: this.workerName,
+          job_id: jobId,
+        })
+      );
+    });
+
+    this.worker.on("drained", () => {
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          service: "worker",
+          event: "queue_drained",
+          queue: this.workerName,
+        })
       );
     });
   }
 
   /**
-   * Para o worker gracefully
+   * ✅ ATUALIZADO: Para o worker gracefully e fecha APENAS blocking client
+   * Singleton não é fechado aqui pois pode ser usado por outros componentes
    */
   async stop(): Promise<void> {
     if (this.isRunning) {
-      console.log(`🛑 [Worker:${this.workerName}] Parando...`);
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          service: "worker",
+          event: "stopping",
+          queue: this.workerName,
+        })
+      );
+
+      // 1. Parar worker primeiro
       await this.worker.close();
+
+      // 2. Fechar APENAS blocking client (singleton é compartilhado)
+      try {
+        await this.blockingClient.quit();
+        console.log(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "info",
+            service: "worker",
+            event: "blocking_client_closed",
+            queue: this.workerName,
+          })
+        );
+      } catch (error: any) {
+        console.warn(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "warn",
+            service: "worker",
+            event: "blocking_client_close_error",
+            queue: this.workerName,
+            error: error.message,
+          })
+        );
+      }
+
       this.isRunning = false;
-      console.log(`✅ [Worker:${this.workerName}] Parado`);
+
+      console.log(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          service: "worker",
+          event: "stopped",
+          queue: this.workerName,
+        })
+      );
     }
   }
 
   /**
    * Verifica se worker está rodando
    */
-  async isActive(): Promise<boolean> {
-    return !this.worker.closing;
+  isActive(): boolean {
+    return this.isRunning && !this.worker.closing;
   }
 
   /**
@@ -171,5 +386,12 @@ export abstract class BaseWorker<T extends BaseJobData> {
    */
   async waitUntilReady(): Promise<void> {
     await this.worker.waitUntilReady();
+  }
+
+  /**
+   * Getter para o worker (para compatibilidade)
+   */
+  getWorker(): Worker<T> {
+    return this.worker;
   }
 }

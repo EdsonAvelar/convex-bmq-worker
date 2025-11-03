@@ -135,11 +135,13 @@ curl http://localhost:3001/health
 
 1. **Criar conta**: Acesse [railway.app](https://railway.app) e faça login com GitHub
 
-2. **Novo projeto**: 
+2. **Novo projeto**:
+
    - New Project → Deploy from GitHub repo
    - Selecione o repositório deste worker
 
 3. **Configurar variáveis de ambiente**:
+
    - Vá em **Variables** no dashboard
    - Adicione as variáveis (SEM `DATABASE_URL`!):
      ```
@@ -152,6 +154,7 @@ curl http://localhost:3001/health
      ```
 
 4. **Deploy automático**:
+
    - Railway detecta o `Dockerfile` e faz build automaticamente
    - Acompanhe os logs na aba **Deployments**
 
@@ -187,6 +190,7 @@ railway logs
 ## 📊 Endpoints Disponíveis
 
 ### Health Check (Status Geral)
+
 ```bash
 GET /health
 
@@ -200,6 +204,7 @@ GET /health
 ```
 
 ### Readiness (Railway/K8s)
+
 ```bash
 GET /ready
 
@@ -208,6 +213,7 @@ GET /ready
 ```
 
 ### Liveness (Railway/K8s)
+
 ```bash
 GET /live
 
@@ -239,17 +245,17 @@ npm run test:load
 
 ## 📝 Variáveis de Ambiente
 
-| Variável | Obrigatório | Default | Descrição |
-|----------|-------------|---------|-----------|
-| `UPSTASH_REDIS_REST_URL` | ✅ | - | URL do Upstash Redis |
-| `UPSTASH_REDIS_REST_TOKEN` | ✅ | - | Token do Upstash Redis |
-| `APP_URL` | ✅ | - | URL do Next.js (Vercel) |
-| `INTERNAL_API_SECRET` | ✅ | - | Secret compartilhado (min 32 chars) |
-| `NODE_ENV` | ❌ | `production` | Ambiente de execução |
-| `PORT` | ❌ | `3001` | Porta do health server |
-| `WORKER_CONCURRENCY` | ❌ | `5` | Jobs simultâneos |
-| `WORKER_LOCK_DURATION` | ❌ | `120000` | Lock duration em ms |
-| `TZ` | ❌ | `UTC` | Timezone |
+| Variável                   | Obrigatório | Default      | Descrição                           |
+| -------------------------- | ----------- | ------------ | ----------------------------------- |
+| `UPSTASH_REDIS_REST_URL`   | ✅          | -            | URL do Upstash Redis                |
+| `UPSTASH_REDIS_REST_TOKEN` | ✅          | -            | Token do Upstash Redis              |
+| `APP_URL`                  | ✅          | -            | URL do Next.js (Vercel)             |
+| `INTERNAL_API_SECRET`      | ✅          | -            | Secret compartilhado (min 32 chars) |
+| `NODE_ENV`                 | ❌          | `production` | Ambiente de execução                |
+| `PORT`                     | ❌          | `3001`       | Porta do health server              |
+| `WORKER_CONCURRENCY`       | ❌          | `5`          | Jobs simultâneos                    |
+| `WORKER_LOCK_DURATION`     | ❌          | `120000`     | Lock duration em ms                 |
+| `TZ`                       | ❌          | `UTC`        | Timezone                            |
 
 ### 🔐 Gerar INTERNAL_API_SECRET seguro
 
@@ -291,10 +297,10 @@ class EmailWorker extends BaseWorker<EmailJobData> {
 
   protected async processJob(job: Job<EmailJobData>): Promise<any> {
     const { to, subject, body } = job.data;
-    
+
     // Lógica de envio de email
     console.log(`📧 Enviando email para ${to}...`);
-    
+
     return { sent: true };
   }
 }
@@ -373,6 +379,7 @@ curl -X POST https://your-redis.upstash.io \
 - **Total estimado**: ~$6-7/mês
 
 Para reduzir custos:
+
 - Use 256 MB se processamento for leve
 - Configure auto-scaling (desligar em horários ociosos)
 - Otimize concorrência e timeouts
@@ -407,3 +414,6 @@ MIT License - veja arquivo LICENSE para detalhes
 **Criado por**: Convex Team  
 **Última atualização**: 03/11/2025  
 **Versão**: 1.0.0
+
+
+docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' redis

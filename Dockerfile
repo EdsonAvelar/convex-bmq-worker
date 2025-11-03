@@ -28,7 +28,8 @@ WORKDIR /app
 RUN apk add --no-cache \
     libc6-compat \
     dumb-init \
-    curl
+    curl \
+    ca-certificates
 
 # Criar usuário não-root
 RUN addgroup --system --gid 1001 nodejs && \
@@ -52,9 +53,9 @@ ENV NODE_ENV=production \
 
 USER worker
 
-# Health check
+# Health check - ✅ Robusto com curl -fsS
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:3001/health || exit 1
+    CMD curl -fsS http://localhost:3001/health || exit 1
 
 # Expor porta
 EXPOSE 3001

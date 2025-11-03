@@ -1,0 +1,59 @@
+# Docker Compose para desenvolvimento local do worker
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: convex-redis-dev
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    
+  redis_insight:
+    image: redislabs/redisinsight:latest
+    container_name: redis_insight
+    restart: always
+    ports:
+      - "5540:5540"
+    volumes:
+      - redis_insight_volume_data:/db
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: convex-worker-dev
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      # Use Redis local via rede interna do docker-compose
+      REDIS_URL: redis://redis:6379
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  redis-data:
+  redis_insight_volume_data:
