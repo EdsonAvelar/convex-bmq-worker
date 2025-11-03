@@ -1,5 +1,5 @@
 # Dockerfile para BullMQ Worker (Railway)
-# Multi-stage build otimizado
+# Multi-stage build otimizado - SEM acesso ao banco de dados
 
 # ============================================================================
 # Stage 1: Dependencies
@@ -10,16 +10,13 @@ WORKDIR /app
 # Instalar dependências do sistema
 RUN apk add --no-cache \
     libc6-compat \
-    openssl \
     ca-certificates
 
 # Copiar package files
 COPY package*.json ./
-COPY prisma ./prisma/
 
-# Instalar dependências e gerar Prisma Client
-RUN npm ci --only=production && \
-    npx prisma generate
+# Instalar apenas prod dependencies
+RUN npm ci --only=production
 
 # ============================================================================
 # Stage 2: Runner
@@ -30,7 +27,6 @@ WORKDIR /app
 # Instalar dependências runtime
 RUN apk add --no-cache \
     libc6-compat \
-    openssl \
     dumb-init \
     curl
 
@@ -38,9 +34,8 @@ RUN apk add --no-cache \
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 worker
 
-# Copiar node_modules e Prisma Client
+# Copiar node_modules
 COPY --from=deps --chown=worker:nodejs /app/node_modules ./node_modules
-COPY --from=deps --chown=worker:nodejs /app/prisma ./prisma
 
 # Copiar source code
 COPY --chown=worker:nodejs src ./src

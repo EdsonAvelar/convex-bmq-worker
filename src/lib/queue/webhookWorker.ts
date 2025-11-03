@@ -1,7 +1,6 @@
 // src/lib/queue/webhookWorker.ts
 import { Job } from "bullmq";
 import { BaseWorker } from "./BaseWorker";
-import { prisma } from "../db";
 
 /**
  * Dados específicos para jobs de webhook
@@ -16,6 +15,64 @@ export interface WebhookJobData {
   headers: Record<string, string>;
   body: any;
   timestamp?: string;
+}
+
+/**
+ * Salva log de webhook via API interna (seguro - não acessa banco diretamente)
+ */
+async function saveWebhookLog(logData: {
+  integrationId: number;
+  negocioId?: number;
+  tenantId: number;
+  url: string;
+  method: string;
+  statusCode: number | null;
+  success: boolean;
+  errorMessage: string | null;
+  requestBody: string;
+  responseBody: string | null;
+  duration: number;
+  attemptNumber: number;
+}): Promise<void> {
+  const apiUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL;
+  const apiSecret = process.env.INTERNAL_API_SECRET;
+
+  if (!apiUrl) {
+    console.error("❌ [saveWebhookLog] APP_URL não configurada - log não será salvo");
+    return;
+  }
+
+  if (!apiSecret) {
+    console.error("❌ [saveWebhookLog] INTERNAL_API_SECRET não configurada - log não será salvo");
+    return;
+  }
+
+  try {
+    const response = await fetch(`${apiUrl}/api/internal/webhook-logs`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-internal-secret": apiSecret,
+      },
+      body: JSON.stringify(logData),
+      signal: AbortSignal.timeout(5000), // 5s timeout
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(
+        `❌ [saveWebhookLog] API retornou erro ${response.status}: ${errorText}`
+      );
+      return;
+    }
+
+    console.log("✅ [saveWebhookLog] Log salvo via API com sucesso");
+  } catch (error: any) {
+    console.error(
+      `❌ [saveWebhookLog] Erro ao chamar API:`,
+      error.message
+    );
+  }
 }
 
 /**
@@ -111,27 +168,25 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
         console.log(`⏱️ Tempo: ${duration}ms`);
       }
 
-      // Salvar log no banco
-      await prisma.webhookLog.create({
-        data: {
-          integrationId,
-          negocioId: negocioId || null,
-          tenantId,
-          url,
-          method: method || "POST",
-          statusCode: statusCode,
-          success,
-          errorMessage: success
-            ? null
-            : `HTTP ${statusCode}: ${response.statusText}`,
-          requestBody: JSON.stringify(body),
-          responseBody: responseBody ? JSON.stringify(responseBody) : null,
-          duration,
-          attemptNumber,
-        },
+      // Salvar log via API interna (seguro)
+      await saveWebhookLog({
+        integrationId,
+        negocioId: negocioId || undefined,
+        tenantId,
+        url,
+        method: method || "POST",
+        statusCode: statusCode,
+        success,
+        errorMessage: success
+          ? null
+          : `HTTP ${statusCode}: ${response.statusText}`,
+        requestBody: JSON.stringify(body),
+        responseBody: responseBody ? JSON.stringify(responseBody) : null,
+        duration,
+        attemptNumber,
       });
 
-      console.log(`💾 [WebhookWorker] Log salvo no banco`);
+      console.log(`💾 [WebhookWorker] Log enviado para API`);
 
       if (!success) {
         throw new Error(`HTTP ${statusCode}: ${response.statusText}`);
@@ -173,25 +228,23 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
 
       console.log(`${"!".repeat(80)}\n`);
 
-      // Salvar erro no banco
-      await prisma.webhookLog.create({
-        data: {
-          integrationId,
-          negocioId: negocioId || null,
-          tenantId,
-          url,
-          method: method || "POST",
-          statusCode: statusCode || 0,
-          success: false,
-          errorMessage,
-          requestBody: JSON.stringify(body),
-          responseBody: null,
-          duration,
-          attemptNumber,
-        },
+      // Salvar erro via API interna (seguro)
+      await saveWebhookLog({
+        integrationId,
+        negocioId: negocioId || undefined,
+        tenantId,
+        url,
+        method: method || "POST",
+        statusCode: statusCode || 0,
+        success: false,
+        errorMessage,
+        requestBody: JSON.stringify(body),
+        responseBody: null,
+        duration,
+        attemptNumber,
       });
 
-      console.log(`💾 [WebhookWorker] Log de erro salvo no banco`);
+      console.log(`💾 [WebhookWorker] Log de erro enviado para API`);
 
       // Re-throw para BullMQ fazer retry
       throw error;

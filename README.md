@@ -2,21 +2,43 @@
 
 Worker BullMQ standalone para processamento de filas (webhooks, emails, notificações, etc). Deployável em Railway, VPS, Render, Fly.io ou qualquer runtime de containers.
 
+## 🔒 Arquitetura de Segurança
+
+**O worker NÃO tem acesso direto ao banco de dados!**
+
+- ✅ Worker processa webhooks e envia logs via API interna
+- ✅ Apenas 1 secret compartilhado (`INTERNAL_API_SECRET`)
+- ✅ API route `/api/internal/webhook-logs` no Next.js persiste dados
+- ✅ Railway não precisa de credenciais do banco
+- ✅ Isolamento total de dados sensíveis
+
+```
+┌─────────────────┐          ┌──────────────────┐          ┌─────────────┐
+│   Vercel App    │          │  Railway Worker  │          │  Database   │
+│   (Next.js)     │─enqueue─▶│    (BullMQ)      │          │ (Supabase)  │
+│                 │          │                  │          │             │
+│  /api/internal/ │◀─logs────│  webhookWorker   │          │             │
+│  webhook-logs   │          │  (POST to API)   │          │             │
+│                 │          │                  │          │             │
+│  basePrisma     │─────────saves logs────────────────────▶│             │
+└─────────────────┘          └──────────────────┘          └─────────────┘
+     ▲                              │
+     │                              │
+     └────shares INTERNAL_API_SECRET┘
+```
+
 ## 📦 Estrutura do Projeto
 
 ```
 worker_railway/
 ├── src/
 │   ├── index.ts                  # Entrypoint principal
-│   ├── lib/
-│   │   ├── db.ts                 # Prisma Client singleton
-│   │   └── queue/
-│   │       ├── connection.ts     # Conexão Redis (Upstash)
-│   │       ├── BaseQueue.ts      # Classe base para filas
-│   │       ├── BaseWorker.ts     # Classe base para workers
-│   │       └── webhookWorker.ts  # Worker de webhooks
-├── prisma/
-│   └── schema.prisma             # Schema Prisma (modelos necessários)
+│   └── lib/
+│       └── queue/
+│           ├── connection.ts     # Conexão Redis (Upstash)
+│           ├── BaseQueue.ts      # Classe base para filas
+│           ├── BaseWorker.ts     # Classe base para workers
+│           └── webhookWorker.ts  # Worker de webhooks (chama API)
 ├── Dockerfile                     # Imagem Docker otimizada
 ├── railway.json                   # Configuração Railway
 ├── package.json
@@ -54,8 +76,12 @@ Edite o arquivo `.env`:
 UPSTASH_REDIS_REST_URL=https://your-redis.upstash.io
 UPSTASH_REDIS_REST_TOKEN=your_token_here
 
-# Database (PostgreSQL) - OBRIGATÓRIO
-DATABASE_URL=postgresql://user:password@host:5432/database
+# App URL (Next.js na Vercel) - OBRIGATÓRIO
+APP_URL=https://your-app.vercel.app
+
+# Secret compartilhado - OBRIGATÓRIO
+# Gere um com: openssl rand -hex 32
+INTERNAL_API_SECRET=your_super_secret_token_here
 
 # Worker Config
 NODE_ENV=production
@@ -64,10 +90,13 @@ WORKER_CONCURRENCY=5
 WORKER_LOCK_DURATION=120000
 ```
 
-### 3. Gerar Prisma Client
+### 3. Configurar secret no Next.js (Vercel)
+
+**IMPORTANTE**: O mesmo `INTERNAL_API_SECRET` deve estar na Vercel:
 
 ```bash
-npm run db:generate
+# Na Vercel (Settings → Environment Variables)
+INTERNAL_API_SECRET=your_super_secret_token_here
 ```
 
 ### 4. Testar localmente
@@ -112,11 +141,12 @@ curl http://localhost:3001/health
 
 3. **Configurar variáveis de ambiente**:
    - Vá em **Variables** no dashboard
-   - Adicione todas as variáveis do `.env.example`:
+   - Adicione as variáveis (SEM `DATABASE_URL`!):
      ```
      UPSTASH_REDIS_REST_URL
      UPSTASH_REDIS_REST_TOKEN
-     DATABASE_URL
+     APP_URL=https://your-app.vercel.app
+     INTERNAL_API_SECRET=your_super_secret_token_here
      NODE_ENV=production
      PORT=3001
      ```
@@ -213,13 +243,28 @@ npm run test:load
 |----------|-------------|---------|-----------|
 | `UPSTASH_REDIS_REST_URL` | ✅ | - | URL do Upstash Redis |
 | `UPSTASH_REDIS_REST_TOKEN` | ✅ | - | Token do Upstash Redis |
-| `DATABASE_URL` | ✅ | - | PostgreSQL connection string |
-| `DIRECT_URL` | ❌ | - | Database URL direto (sem pooling) |
+| `APP_URL` | ✅ | - | URL do Next.js (Vercel) |
+| `INTERNAL_API_SECRET` | ✅ | - | Secret compartilhado (min 32 chars) |
 | `NODE_ENV` | ❌ | `production` | Ambiente de execução |
 | `PORT` | ❌ | `3001` | Porta do health server |
 | `WORKER_CONCURRENCY` | ❌ | `5` | Jobs simultâneos |
 | `WORKER_LOCK_DURATION` | ❌ | `120000` | Lock duration em ms |
 | `TZ` | ❌ | `UTC` | Timezone |
+
+### 🔐 Gerar INTERNAL_API_SECRET seguro
+
+```bash
+# Linux/Mac
+openssl rand -hex 32
+
+# Windows (PowerShell)
+-join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | % {[char]$_})
+
+# Exemplo de secret forte:
+# a7f3e9b2c8d4f1a6e5b9c3d7f2a8e4b6c9d5f1a3e7b2c8d4f6a9e3b7c1d5f8a2
+```
+
+**IMPORTANTE**: Use o mesmo secret na Vercel e no Railway!
 
 ## 🎯 Adicionando Novos Workers
 

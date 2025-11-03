@@ -11,7 +11,6 @@
 import http from "http";
 import { startWebhookWorker, stopWebhookWorker, webhookWorker } from "./lib/queue/webhookWorker";
 import { closeRedisConnection } from "./lib/queue/connection";
-import { disconnectPrisma } from "./lib/db";
 
 // ============================================================================
 // Global State
@@ -170,9 +169,6 @@ async function gracefulShutdown(signal: string) {
     log("info", "Closing Redis connection...");
     await closeRedisConnection();
 
-    log("info", "Closing Prisma connection...");
-    await disconnectPrisma();
-
     // 3. Fechar health server
     if (healthServer) {
       await new Promise<void>((resolve) => {
@@ -209,7 +205,8 @@ async function main() {
     const requiredEnvs = [
       "UPSTASH_REDIS_REST_URL",
       "UPSTASH_REDIS_REST_TOKEN",
-      "DATABASE_URL",
+      "INTERNAL_API_SECRET",
+      "APP_URL",
     ];
 
     const missingEnvs = requiredEnvs.filter((env) => !process.env[env]);

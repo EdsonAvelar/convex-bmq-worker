@@ -8,8 +8,6 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "db:generate": "prisma generate",
-    "db:push": "prisma db push",
     "health": "curl http://localhost:3001/health",
     "test:load": "node scripts/test-load.js"
   },
@@ -23,14 +21,12 @@
   "author": "Convex Team",
   "license": "MIT",
   "dependencies": {
-    "@prisma/client": "^6.16.2",
     "@upstash/redis": "^1.34.3",
     "bullmq": "^5.63.0",
     "ioredis": "^5.8.2"
   },
   "devDependencies": {
     "@types/node": "^20.17.9",
-    "prisma": "^6.16.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   },
