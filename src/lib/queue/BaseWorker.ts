@@ -212,6 +212,22 @@ export abstract class BaseWorker<T extends BaseJobData> {
     this.worker.on("completed", (job) => {
       if (!job) return;
 
+      // Calcular duração
+      const duration =
+        job.finishedOn && job.processedOn
+          ? job.finishedOn - job.processedOn
+          : 0;
+
+      // Registrar métrica de sucesso
+      try {
+        const { recordJobSuccess } = require("../../../index");
+        if (recordJobSuccess && duration > 0) {
+          recordJobSuccess(duration);
+        }
+      } catch (e) {
+        // Silencioso se index não estiver disponível
+      }
+
       console.log(
         JSON.stringify({
           timestamp: new Date().toISOString(),
@@ -223,11 +239,23 @@ export abstract class BaseWorker<T extends BaseJobData> {
           tenant_id: job.data.tenantId,
           attempt: job.attemptsMade + 1,
           total_attempts: job.opts.attempts || 3,
+          duration_ms: duration,
         })
       );
     });
 
     this.worker.on("failed", (job, err) => {
+      if (!job) return;
+
+      // Registrar métrica de falha
+      try {
+        const { recordJobFailure } = require("../../../index");
+        if (recordJobFailure) {
+          recordJobFailure(err.message);
+        }
+      } catch (e) {
+        // Silencioso se index não estiver disponível
+      }
       if (!job) return;
 
       const attemptMsg = `${job.attemptsMade + 1}/${job.opts.attempts || 3}`;

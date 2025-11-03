@@ -29,6 +29,111 @@ let isShuttingDown = false;
 let healthServer: http.Server | null = null;
 
 // ============================================================================
+// Metrics Tracking
+// ============================================================================
+
+interface Metrics {
+  jobs: {
+    processed: number;
+    failed: number;
+    totalDurationMs: number;
+    avgDurationMs: number;
+    minDurationMs: number;
+    maxDurationMs: number;
+    lastProcessedAt: string | null;
+  };
+  performance: {
+    jobsPerSecond: number;
+    jobsLastMinute: number;
+    jobsLastHour: number;
+  };
+  errors: {
+    count: number;
+    lastError: string | null;
+    lastErrorAt: string | null;
+  };
+}
+
+const metrics: Metrics = {
+  jobs: {
+    processed: 0,
+    failed: 0,
+    totalDurationMs: 0,
+    avgDurationMs: 0,
+    minDurationMs: Infinity,
+    maxDurationMs: 0,
+    lastProcessedAt: null,
+  },
+  performance: {
+    jobsPerSecond: 0,
+    jobsLastMinute: 0,
+    jobsLastHour: 0,
+  },
+  errors: {
+    count: 0,
+    lastError: null,
+    lastErrorAt: null,
+  },
+};
+
+// Contadores para cálculo de taxa
+const recentJobs: { timestamp: number }[] = [];
+
+/**
+ * Registra processamento de job bem-sucedido
+ */
+export function recordJobSuccess(durationMs: number) {
+  metrics.jobs.processed++;
+  metrics.jobs.totalDurationMs += durationMs;
+  metrics.jobs.avgDurationMs =
+    metrics.jobs.totalDurationMs / metrics.jobs.processed;
+  metrics.jobs.minDurationMs = Math.min(metrics.jobs.minDurationMs, durationMs);
+  metrics.jobs.maxDurationMs = Math.max(metrics.jobs.maxDurationMs, durationMs);
+  metrics.jobs.lastProcessedAt = new Date().toISOString();
+
+  // Adicionar ao histórico recente
+  recentJobs.push({ timestamp: Date.now() });
+
+  // Limpar jobs antigos (mais de 1 hora)
+  const oneHourAgo = Date.now() - 3600000;
+  while (recentJobs.length > 0 && recentJobs[0].timestamp < oneHourAgo) {
+    recentJobs.shift();
+  }
+}
+
+/**
+ * Registra falha de job
+ */
+export function recordJobFailure(error: string) {
+  metrics.jobs.failed++;
+  metrics.errors.count++;
+  metrics.errors.lastError = error.substring(0, 200);
+  metrics.errors.lastErrorAt = new Date().toISOString();
+}
+
+/**
+ * Calcula métricas de performance em tempo real
+ */
+function calculatePerformanceMetrics() {
+  const now = Date.now();
+  const oneSecondAgo = now - 1000;
+  const oneMinuteAgo = now - 60000;
+  const oneHourAgo = now - 3600000;
+
+  metrics.performance.jobsPerSecond = recentJobs.filter(
+    (j) => j.timestamp > oneSecondAgo
+  ).length;
+
+  metrics.performance.jobsLastMinute = recentJobs.filter(
+    (j) => j.timestamp > oneMinuteAgo
+  ).length;
+
+  metrics.performance.jobsLastHour = recentJobs.filter(
+    (j) => j.timestamp > oneHourAgo
+  ).length;
+}
+
+// ============================================================================
 // Health & Metrics
 // ============================================================================
 
@@ -106,8 +211,11 @@ function createHealthServer(port: number = 3001) {
   const server = http.createServer(async (req, res) => {
     // CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization"
+    );
 
     if (req.method === "OPTIONS") {
       res.writeHead(200);
@@ -226,6 +334,262 @@ function createHealthServer(port: number = 3001) {
     if (path === "/live" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ alive: true }));
+      return;
+    }
+
+    // ✅ POST /webhooks - Adicionar job de webhook na fila
+    if (path === "/webhooks" && req.method === "POST") {
+      let body = "";
+
+      req.on("data", (chunk) => {
+        body += chunk.toString();
+      });
+
+      req.on("end", async () => {
+        try {
+          const data = JSON.parse(body);
+
+          // Validação básica
+          if (!data.tenantId || !data.webhookUrl) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "Missing required fields: tenantId, webhookUrl",
+              })
+            );
+            return;
+          }
+
+          // Adicionar job na fila
+          const { Queue } = await import("bullmq");
+          const redis = getRedisSingleton();
+          const queue = new Queue("webhooks", { connection: redis });
+
+          const job = await queue.add("webhook", {
+            tenantId: data.tenantId,
+            webhookUrl: data.webhookUrl,
+            payload: data.payload || {},
+            headers: data.headers || {},
+            timestamp: new Date().toISOString(),
+            metadata: data.metadata || {},
+          });
+
+          await queue.close();
+
+          console.log(
+            JSON.stringify({
+              timestamp: new Date().toISOString(),
+              level: "info",
+              service: "api",
+              event: "webhook_job_added",
+              job_id: job.id,
+              tenant_id: data.tenantId,
+              webhook_url: data.webhookUrl,
+            })
+          );
+
+          res.writeHead(201, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              success: true,
+              jobId: job.id,
+              message: "Webhook job added to queue",
+            })
+          );
+        } catch (error: any) {
+          console.error(
+            JSON.stringify({
+              timestamp: new Date().toISOString(),
+              level: "error",
+              service: "api",
+              event: "webhook_job_add_failed",
+              error: error.message,
+            })
+          );
+
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "Failed to add job to queue",
+              message: error.message,
+            })
+          );
+        }
+      });
+      return;
+    }
+
+    // ✅ GET /webhooks/stats - Estatísticas da fila
+    if (path === "/webhooks/stats" && req.method === "GET") {
+      try {
+        const { Queue } = await import("bullmq");
+        const redis = getRedisSingleton();
+        const queue = new Queue("webhooks", { connection: redis });
+
+        const counts = await queue.getJobCounts(
+          "waiting",
+          "active",
+          "completed",
+          "failed",
+          "delayed"
+        );
+
+        await queue.close();
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            queue: "webhooks",
+            counts,
+            timestamp: new Date().toISOString(),
+          })
+        );
+      } catch (error: any) {
+        console.error(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "error",
+            service: "api",
+            event: "queue_stats_failed",
+            error: error.message,
+          })
+        );
+
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "Failed to get queue stats",
+            message: error.message,
+          })
+        );
+      }
+      return;
+    }
+
+    // ✅ GET /metrics - Métricas de performance em tempo real
+    if (path === "/metrics" && req.method === "GET") {
+      try {
+        calculatePerformanceMetrics();
+
+        // Obter estatísticas da fila também
+        const { Queue } = await import("bullmq");
+        const redis = getRedisSingleton();
+        const queue = new Queue("webhooks", { connection: redis });
+        const counts = await queue.getJobCounts(
+          "waiting",
+          "active",
+          "completed",
+          "failed"
+        );
+        await queue.close();
+
+        // Calcular taxa de sucesso
+        const totalJobs = metrics.jobs.processed + metrics.jobs.failed;
+        const successRate =
+          totalJobs > 0
+            ? ((metrics.jobs.processed / totalJobs) * 100).toFixed(2)
+            : "0.00";
+
+        // Identificar gargalos
+        const bottlenecks: string[] = [];
+        if (counts.waiting > 100) {
+          bottlenecks.push("HIGH_QUEUE_BACKLOG");
+        }
+        if (counts.active >= 10) {
+          bottlenecks.push("MAX_CONCURRENCY_REACHED");
+        }
+        if (metrics.jobs.avgDurationMs > 2000) {
+          bottlenecks.push("SLOW_WEBHOOK_RESPONSES");
+        }
+        if (metrics.performance.jobsPerSecond < 1 && counts.waiting > 0) {
+          bottlenecks.push("LOW_THROUGHPUT");
+        }
+
+        // Recomendações automáticas
+        const recommendations: string[] = [];
+        if (bottlenecks.includes("MAX_CONCURRENCY_REACHED")) {
+          recommendations.push(
+            "Increase WORKER_CONCURRENCY to process more jobs simultaneously"
+          );
+        }
+        if (bottlenecks.includes("HIGH_QUEUE_BACKLOG")) {
+          recommendations.push(
+            "Add more worker instances (horizontal scaling)"
+          );
+        }
+        if (bottlenecks.includes("SLOW_WEBHOOK_RESPONSES")) {
+          recommendations.push(
+            "Check webhook endpoint performance or add timeout"
+          );
+        }
+
+        const response = {
+          timestamp: new Date().toISOString(),
+          uptime: Math.floor((Date.now() - startTime) / 1000),
+
+          // Métricas de jobs
+          jobs: {
+            ...metrics.jobs,
+            minDurationMs:
+              metrics.jobs.minDurationMs === Infinity
+                ? 0
+                : metrics.jobs.minDurationMs,
+            successRate: `${successRate}%`,
+          },
+
+          // Performance em tempo real
+          performance: {
+            ...metrics.performance,
+            currentThroughput: `${metrics.performance.jobsPerSecond} jobs/second`,
+            estimatedCapacity: `${(
+              metrics.performance.jobsPerSecond * 60
+            ).toFixed(0)} jobs/minute`,
+          },
+
+          // Estado da fila
+          queue: {
+            waiting: counts.waiting,
+            active: counts.active,
+            completed: counts.completed,
+            failed: counts.failed,
+            status: counts.waiting > 50 ? "⚠️ Backlog building" : "✅ Healthy",
+          },
+
+          // Análise de saúde
+          health: {
+            bottlenecks: bottlenecks.length > 0 ? bottlenecks : ["NONE"],
+            recommendations:
+              recommendations.length > 0
+                ? recommendations
+                : ["System running optimally"],
+            needsScaling: counts.waiting > 100 || counts.active >= 10,
+          },
+
+          // Erros
+          errors: metrics.errors,
+        };
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(response, null, 2));
+      } catch (error: any) {
+        console.error(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "error",
+            service: "api",
+            event: "metrics_failed",
+            error: error.message,
+          })
+        );
+
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "Failed to get metrics",
+            message: error.message,
+          })
+        );
+      }
       return;
     }
 
