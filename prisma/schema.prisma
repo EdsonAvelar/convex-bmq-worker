@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================================================
+// MODELS NECESSÁRIOS PARA O WORKER
+// ============================================================================
+// Apenas os modelos que o worker precisa acessar
+// Schema mínimo para reduzir overhead
+
+model Tenant {
+  id   Int    @id @default(autoincrement())
+  name String
+
+  webhookLogs WebhookLog[]
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("Tenant")
+}
+
+model Integration {
+  id   Int    @id @default(autoincrement())
+  name String
+
+  tenantId        Int
+  defaultOwnerId  Int?
+  defaultOwner    User? @relation(fields: [defaultOwnerId], references: [id])
+
+  webhookUrl String?
+  active     Boolean @default(true)
+
+  webhookLogs WebhookLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("Integration")
+}
+
+model User {
+  id   Int    @id @default(autoincrement())
+  name String
+  
+  integrations Integration[]
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("User")
+}
+
+model Negocio {
+  id Int @id @default(autoincrement())
+
+  tenantId Int
+
+  webhookLogs WebhookLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("Negocio")
+}
+
+model WebhookLog {
+  id            Int      @id @default(autoincrement())
+  integrationId Int
+  integration   Integration @relation(fields: [integrationId], references: [id])
+  negocioId     Int?
+  negocio       Negocio? @relation(fields: [negocioId], references: [id])
+  tenantId      Int
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  
+  url           String
+  method        String   @default("POST")
+  statusCode    Int?
+  success       Boolean
+  errorMessage  String?  @db.Text
+  requestBody   String?  @db.Text
+  responseBody  String?  @db.Text
+  duration      Int?
+  attemptNumber Int      @default(1)
+  
+  createdAt     DateTime @default(now())
+
+  @@index([integrationId])
+  @@index([tenantId])
+  @@index([negocioId])
+  @@index([createdAt])
+  @@map("WebhookLog")
+}
