@@ -1,12 +1,14 @@
 # API do Worker BullMQ - Guia de Uso
 
-## Endpoints Disponíveis
+## 📍 Endpoints Disponíveis
+
+Base URL: `http://localhost:3002/queue`
 
 ### 1. Health Check
 
 ```bash
 # Verificar se o worker está saudável
-curl http://localhost:3002/health
+curl http://localhost:3002/queue/health
 
 # Resposta:
 {
@@ -30,7 +32,7 @@ curl http://localhost:3002/health
 
 ```bash
 # Adicionar um job na fila
-curl -X POST http://localhost:3002/webhooks \
+curl -X POST http://localhost:3002/queue/webhooks/add \
   -H "Content-Type: application/json" \
   -d '{
     "tenantId": 1,
@@ -64,7 +66,7 @@ curl -X POST http://localhost:3002/webhooks \
 
 ```bash
 # Ver status da fila
-curl http://localhost:3002/webhooks/stats
+curl http://localhost:3002/queue/webhooks/stats
 
 # Resposta:
 {
@@ -80,6 +82,30 @@ curl http://localhost:3002/webhooks/stats
 }
 ```
 
+### 4. Readiness Check (GET)
+
+```bash
+# Verificar se está pronto para receber jobs
+curl http://localhost:3002/queue/ready
+
+# Resposta:
+{"ready": true}
+```
+
+### 5. Liveness Check (GET)
+
+```bash
+# Verificar se o processo está vivo
+curl http://localhost:3002/queue/live
+
+# Resposta:
+{"alive": true}
+```
+
+## Testando o Worker
+
+````
+
 ## Testando o Worker
 
 ### 1. Inicie o Docker Compose
@@ -91,13 +117,13 @@ docker-compose up --build
 ### 2. Verifique o Health
 
 ```bash
-curl http://localhost:3002/health
+curl http://localhost:3002/queue/health
 ```
 
 ### 3. Adicione um Job de Teste
 
 ```bash
-curl -X POST http://localhost:3002/webhooks \
+curl -X POST http://localhost:3002/queue/webhooks/add \
   -H "Content-Type: application/json" \
   -d '{
     "tenantId": 1,
@@ -130,7 +156,7 @@ docker-compose logs -f worker
 ### 5. Verifique as Estatísticas
 
 ```bash
-curl http://localhost:3002/webhooks/stats
+curl http://localhost:3002/queue/webhooks/stats
 ```
 
 ## Exemplo de Integração Next.js
@@ -145,7 +171,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
 
     // Enviar para o worker BullMQ
-    const response = await fetch('http://worker:3002/webhooks', {
+    const response = await fetch('http://worker:3002/queue/webhooks/add', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -365,3 +391,4 @@ curl http://localhost:3002/webhooks/stats
 # Ver logs de falha
 docker-compose logs worker | grep failed
 ```
+````

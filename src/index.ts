@@ -207,7 +207,7 @@ async function getHealthStatus(): Promise<HealthStatus> {
   };
 }
 
-function createHealthServer(port: number = 3001) {
+function createHealthServer(port: number = 3002) {
   const server = http.createServer(async (req, res) => {
     // CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -227,8 +227,8 @@ function createHealthServer(port: number = 3001) {
     const urlObj = new URL(req.url || "/", "http://localhost");
     const path = urlObj.pathname.replace(/\/$/, "");
 
-    // Health endpoint - ✅ Verificação real Redis + Worker
-    if (path === "/health" && req.method === "GET") {
+    // ✅ Health endpoint - /queue/health
+    if (path === "/queue/health" && req.method === "GET") {
       try {
         const health = await getHealthStatus();
         // ✅ Retorna 200 apenas se Redis responder PONG e worker estiver ativo
@@ -313,8 +313,8 @@ function createHealthServer(port: number = 3001) {
       return;
     }
 
-    // Readiness endpoint (Railway/K8s)
-    if (path === "/ready" && req.method === "GET") {
+    // ✅ Readiness endpoint - /queue/ready
+    if (path === "/queue/ready" && req.method === "GET") {
       try {
         const health = await getHealthStatus();
         const isReady = health.status === "healthy" && !isShuttingDown;
@@ -330,15 +330,15 @@ function createHealthServer(port: number = 3001) {
       return;
     }
 
-    // Liveness endpoint (Railway/K8s)
-    if (path === "/live" && req.method === "GET") {
+    // ✅ Liveness endpoint - /queue/live
+    if (path === "/queue/live" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ alive: true }));
       return;
     }
 
-    // ✅ POST /webhooks - Adicionar job de webhook na fila
-    if (path === "/webhooks" && req.method === "POST") {
+    // ✅ POST /queue/webhooks/add - Adicionar job de webhook na fila
+    if (path === "/queue/webhooks/add" && req.method === "POST") {
       let body = "";
 
       req.on("data", (chunk) => {
@@ -349,6 +349,18 @@ function createHealthServer(port: number = 3001) {
         try {
           const data = JSON.parse(body);
 
+          // ✅ LOG: Sempre logar payload recebido para debug
+          console.log(
+            JSON.stringify({
+              timestamp: new Date().toISOString(),
+              level: "info",
+              service: "api",
+              event: "webhook_request_received",
+              payload: data,
+              payload_keys: Object.keys(data),
+            })
+          );
+
           // Validação básica conforme WebhookJobData
           if (
             !data.tenantId ||
@@ -356,11 +368,30 @@ function createHealthServer(port: number = 3001) {
             !data.url ||
             !data.method
           ) {
+            // ✅ LOG: Logar validação falhou com detalhes
+            console.error(
+              JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: "error",
+                service: "api",
+                event: "webhook_validation_failed",
+                received_fields: {
+                  tenantId: !!data.tenantId,
+                  integrationId: !!data.integrationId,
+                  url: !!data.url,
+                  method: !!data.method,
+                },
+                payload: data,
+              })
+            );
+
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(
               JSON.stringify({
                 error:
                   "Missing required fields: tenantId, integrationId, url, method",
+                received: Object.keys(data),
+                expected: ["tenantId", "integrationId", "url", "method"],
               })
             );
             return;
@@ -376,10 +407,10 @@ function createHealthServer(port: number = 3001) {
             integrationId: data.integrationId,
             integrationName: data.integrationName || "Webhook",
             negocioId: data.negocioId,
-            url: data.url, // ✅ Corrigido: webhookUrl → url
+            url: data.url,
             method: data.method,
             headers: data.headers || {},
-            body: data.body || {}, // ✅ Corrigido: payload → body
+            body: data.body || {},
             timestamp: new Date().toISOString(),
           });
 
@@ -407,6 +438,7 @@ function createHealthServer(port: number = 3001) {
             })
           );
         } catch (error: any) {
+          // ✅ LOG: Erro detalhado com stack trace e body recebido
           console.error(
             JSON.stringify({
               timestamp: new Date().toISOString(),
@@ -414,6 +446,9 @@ function createHealthServer(port: number = 3001) {
               service: "api",
               event: "webhook_job_add_failed",
               error: error.message,
+              error_stack: error.stack,
+              error_name: error.name,
+              received_body: body.substring(0, 500), // Primeiros 500 chars
             })
           );
 
@@ -429,8 +464,8 @@ function createHealthServer(port: number = 3001) {
       return;
     }
 
-    // ✅ GET /webhooks/stats - Estatísticas da fila
-    if (path === "/webhooks/stats" && req.method === "GET") {
+    // ✅ GET /queue/webhooks/stats - Estatísticas da fila
+    if (path === "/queue/webhooks/stats" && req.method === "GET") {
       try {
         const { Queue } = await import("bullmq");
         const redis = getRedisSingleton();
@@ -903,7 +938,7 @@ async function main() {
     );
 
     // 4. Iniciar health server
-    const port = parseInt(process.env.PORT || "3001", 10);
+    const port = parseInt(process.env.PORT || "3002", 10);
     healthServer = createHealthServer(port);
 
     // 5. ✅ Signal handlers robustos

@@ -5,7 +5,7 @@
 echo "🚀 Testando webhook de venda fechada..."
 echo ""
 
-curl -X POST http://localhost:3002/webhooks \
+curl -X POST http://localhost:3002/queue/webhooks/add \
   -H "Content-Type: application/json" \
   -d @examples/webhook-venda-fechada.json \
   --verbose
@@ -14,4 +14,4 @@ echo ""
 echo ""
 echo "✅ Requisição enviada!"
 echo "📊 Verifique os logs com: docker-compose logs -f worker"
-echo "📈 Veja estatísticas em: http://localhost:3002/webhooks/stats"
+echo "📈 Veja estatísticas em: http://localhost:3002/queue/webhooks/stats"

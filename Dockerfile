@@ -48,17 +48,17 @@ RUN npm install -g tsx
 
 # Configurar variáveis de ambiente
 ENV NODE_ENV=production \
-    PORT=3001 \
+    PORT=3002 \
     TZ=UTC
 
 USER worker
 
 # Health check - ✅ Robusto com curl -fsS
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -fsS http://localhost:3001/health || exit 1
+    CMD curl -fsS http://localhost:3002/queue/health || exit 1
 
 # Expor porta
-EXPOSE 3001
+EXPOSE 3002
 
 # Usar dumb-init para proper signal handling
 ENTRYPOINT ["dumb-init", "--"]

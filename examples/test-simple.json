@@ -1,0 +1,15 @@
+{
+  "tenantId": 1,
+  "integrationId": 999,
+  "integrationName": "Teste Simples",
+  "url": "https://webhook.site/your-unique-id-here",
+  "method": "POST",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": {
+    "event": "test.event",
+    "message": "Olá do BullMQ!",
+    "timestamp": "2025-11-03T20:30:00.000Z"
+  }
+}
