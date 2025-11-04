@@ -40,6 +40,7 @@ export interface WebhookJobData {
 
 /**
  * Circuit Breaker simples para webhooks
+ * ✅ ATUALIZADO: Agora é isolado por chave (URL ou integrationId)
  */
 class WebhookCircuitBreaker {
   private failures = 0;
@@ -85,8 +86,35 @@ class WebhookCircuitBreaker {
   }
 }
 
-// Circuit breaker global para webhooks
-const circuitBreaker = new WebhookCircuitBreaker();
+/**
+ * Gerenciador de Circuit Breakers por chave (URL ou integrationId)
+ * Cada webhook/integração tem seu próprio circuit breaker isolado
+ */
+class CircuitBreakerManager {
+  private breakers = new Map<string, WebhookCircuitBreaker>();
+
+  getBreaker(key: string): WebhookCircuitBreaker {
+    if (!this.breakers.has(key)) {
+      this.breakers.set(key, new WebhookCircuitBreaker());
+    }
+    return this.breakers.get(key)!;
+  }
+
+  // Cleanup de breakers inativos (opcional, para evitar memory leak)
+  cleanup(): void {
+    const now = Date.now();
+    for (const [key, breaker] of this.breakers.entries()) {
+      const stats = breaker.getStats();
+      // Remover breakers inativos há mais de 1 hora
+      if (now - stats.lastFailureTime > 3600000 && stats.failures === 0) {
+        this.breakers.delete(key);
+      }
+    }
+  }
+}
+
+// Manager global de circuit breakers (um breaker por URL)
+const circuitBreakerManager = new CircuitBreakerManager();
 
 /**
  * Salva log de webhook via API interna com timeout robusto e AbortController
@@ -258,9 +286,16 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
     const jobId = job.id || "unknown";
     const startedAt = new Date();
 
+    // ✅ Obter circuit breaker específico para esta URL
+    // Cada webhook tem seu próprio circuit breaker isolado
+    const circuitBreakerKey = url; // Usar URL como chave única
+    const circuitBreaker = circuitBreakerManager.getBreaker(circuitBreakerKey);
+
     // ✅ Verificar circuit breaker
     if (circuitBreaker.isOpen()) {
       const stats = circuitBreaker.getStats();
+      const isLastAttempt = attemptNumber >= maxAttempts;
+      
       console.error(
         JSON.stringify({
           timestamp: new Date().toISOString(),
@@ -271,9 +306,82 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
           job_id: jobId,
           tenant_id: tenantId,
           integration_id: integrationId,
+          webhook_url: url,
+          circuit_breaker_key: circuitBreakerKey,
           circuit_breaker_stats: stats,
+          is_last_attempt: isLastAttempt,
+          message: `Circuit breaker para "${url}" está aberto após ${stats.failures} falhas consecutivas`,
         })
       );
+
+      // 🆕 ENVIAR CALLBACK APENAS NA ÚLTIMA TENTATIVA
+      if (isLastAttempt && callbackUrl && callbackSecret) {
+        const callbackPayload: WorkerCallbackPayload = {
+          jobId,
+          jobType: jobType as any,
+          tenantId,
+          integrationId,
+          negocioId,
+          status: "failed",
+          success: false,
+          destination: {
+            url,
+            method,
+            statusCode: 0,
+            duration: 0,
+          },
+          error: {
+            message: `Circuit breaker aberto após ${stats.failures} falhas consecutivas - job abortado`,
+            code: "CIRCUIT_BREAKER_OPEN",
+            isRetryable: false,
+          },
+          execution: {
+            attempt: attemptNumber,
+            maxAttempts,
+            startedAt: startedAt.toISOString(),
+            completedAt: new Date().toISOString(),
+            duration: 0,
+          },
+          metadata,
+        };
+
+        // Enviar callback (não bloquear)
+        sendCallback(callbackPayload, callbackUrl, callbackSecret).catch(
+          (err) => {
+            console.error(
+              JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: "error",
+                service: "webhook-worker",
+                event: "callback_send_failed",
+                job_id: jobId,
+                error: err.message,
+              })
+            );
+          }
+        );
+      } else if (isLastAttempt && !callbackUrl) {
+        // ⚠️ Callback não enviado na última tentativa
+        console.warn(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "warn",
+            service: "webhook-worker",
+            event: "callback_not_sent",
+            reason: !callbackUrl
+              ? "callback_url_not_provided"
+              : "callback_secret_not_provided",
+            queue: "webhooks",
+            job_id: jobId,
+            tenant_id: tenantId,
+            integration_id: integrationId,
+            webhook_status: "failed",
+            error_code: "CIRCUIT_BREAKER_OPEN",
+            message:
+              "Circuit breaker aberto e job morreu, mas callback não foi enviado (URL ou secret não fornecidos no payload)",
+          })
+        );
+      }
 
       throw new Error(`Circuit breaker is open. Failures: ${stats.failures}`);
     }
@@ -540,9 +648,11 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
         attemptNumber,
       });
 
-      // 🆕 ENVIAR CALLBACK DE ERRO/RETRY
-      if (callbackUrl && callbackSecret) {
-        const willRetry = attemptNumber < maxAttempts;
+      // 🆕 ENVIAR CALLBACK APENAS NA ÚLTIMA TENTATIVA (falha definitiva)
+      // Não envia em retries intermediários para evitar spam de callbacks
+      const isLastAttempt = attemptNumber >= maxAttempts;
+      
+      if (isLastAttempt && callbackUrl && callbackSecret) {
         const isRetryable = [
           "TIMEOUT",
           "CONNECTION_FAILED",
@@ -556,7 +666,7 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
           tenantId,
           integrationId,
           negocioId,
-          status: willRetry ? "retrying" : "failed",
+          status: "failed",
           success: false,
           destination: {
             url,
@@ -575,11 +685,6 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
             startedAt: startedAt.toISOString(),
             completedAt: new Date().toISOString(),
             duration,
-            nextRetryAt: willRetry
-              ? new Date(
-                  Date.now() + Math.pow(2, attemptNumber) * 2000
-                ).toISOString()
-              : undefined,
           },
           metadata,
         };
@@ -599,9 +704,8 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
             );
           }
         );
-      } else {
-        // ⚠️ Callback não enviado - URL ou secret não fornecidos
-        const willRetry = attemptNumber < maxAttempts;
+      } else if (isLastAttempt && !callbackUrl) {
+        // ⚠️ Callback não enviado na última tentativa
         console.warn(
           JSON.stringify({
             timestamp: new Date().toISOString(),
@@ -615,11 +719,9 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
             job_id: jobId,
             tenant_id: tenantId,
             integration_id: integrationId,
-            webhook_status: willRetry ? "retrying" : "failed",
+            webhook_status: "failed",
             error_category: errorCategory,
-            message: `Job ${
-              willRetry ? "vai fazer retry" : "falhou permanentemente"
-            } mas callback não foi enviado (URL ou secret não fornecidos no payload)`,
+            message: `Job falhou permanentemente mas callback não foi enviado (URL ou secret não fornecidos no payload)`,
           })
         );
       }
@@ -652,7 +754,7 @@ export function startWebhookWorker(): WebhookWorker {
         level: "info",
         service: "webhook-worker",
         event: "worker_started",
-        circuit_breaker_stats: circuitBreaker.getStats(),
+        message: "Circuit breakers isolados por URL/integração",
       })
     );
   }
@@ -667,9 +769,11 @@ export async function stopWebhookWorker(): Promise<void> {
         level: "info",
         service: "webhook-worker",
         event: "worker_stopping",
-        circuit_breaker_stats: circuitBreaker.getStats(),
       })
     );
+
+    // Cleanup de circuit breakers inativos
+    circuitBreakerManager.cleanup();
 
     await webhookWorker.stop();
 
