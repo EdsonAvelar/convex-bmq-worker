@@ -295,7 +295,7 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
     if (circuitBreaker.isOpen()) {
       const stats = circuitBreaker.getStats();
       const isLastAttempt = attemptNumber >= maxAttempts;
-      
+
       console.error(
         JSON.stringify({
           timestamp: new Date().toISOString(),
@@ -651,7 +651,7 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
       // 🆕 ENVIAR CALLBACK APENAS NA ÚLTIMA TENTATIVA (falha definitiva)
       // Não envia em retries intermediários para evitar spam de callbacks
       const isLastAttempt = attemptNumber >= maxAttempts;
-      
+
       if (isLastAttempt && callbackUrl && callbackSecret) {
         const isRetryable = [
           "TIMEOUT",
