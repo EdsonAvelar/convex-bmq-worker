@@ -3,32 +3,27 @@
 // Servidor mock para receber callbacks do worker (simula o Next.js)
 
 const http = require('http');
-const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3003;
 const SECRET = process.env.QUEUE_WORKER_SECRET || '408c02491b2cb008aaf853a46144844abf3ef6c08ddf621c3072314fbffb8a02';
 
 /**
- * Valida HMAC signature
+ * Valida Bearer Token
  */
-function validateHMAC(payload, signature) {
-    const expectedSignature = crypto
-        .createHmac('sha256', SECRET)
-        .update(JSON.stringify(payload))
-        .digest('hex');
+function validateBearerToken(authHeader) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return false;
+    }
 
-    // Timing-safe comparison
-    return crypto.timingSafeEqual(
-        Buffer.from(signature),
-        Buffer.from(expectedSignature)
-    );
+    const token = authHeader.substring(7); // Remove "Bearer "
+    return token === SECRET;
 }
 
 const server = http.createServer((req, res) => {
     // CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Webhook-Signature');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     if (req.method === 'OPTIONS') {
         res.writeHead(200);
@@ -47,7 +42,7 @@ const server = http.createServer((req, res) => {
         req.on('end', () => {
             try {
                 const payload = JSON.parse(body);
-                const signature = req.headers['x-webhook-signature'];
+                const authHeader = req.headers['authorization'];
 
                 console.log('\n🎯 Callback Recebido:');
                 console.log('====================');
@@ -68,31 +63,15 @@ const server = http.createServer((req, res) => {
                     }
                 }
 
-                // Validar HMAC
-                if (!signature) {
-                    console.log('⚠️  AVISO: Signature não fornecida!');
+                // Validar Bearer Token
+                if (!validateBearerToken(authHeader)) {
+                    console.log('❌ ERRO: Bearer Token inválido ou ausente!');
                     res.writeHead(401, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Missing signature' }));
+                    res.end(JSON.stringify({ error: 'Invalid or missing Bearer Token' }));
                     return;
                 }
 
-                try {
-                    const isValid = validateHMAC(payload, signature);
-
-                    if (!isValid) {
-                        console.log('❌ ERRO: Signature inválida!');
-                        res.writeHead(401, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: 'Invalid signature' }));
-                        return;
-                    }
-
-                    console.log('✅ Signature válida!');
-                } catch (err) {
-                    console.log('❌ ERRO ao validar signature:', err.message);
-                    res.writeHead(401, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify({ error: 'Invalid signature format' }));
-                    return;
-                }
+                console.log('✅ Bearer Token válido!');
 
                 // Simular salvamento no banco
                 console.log('💾 Salvando no banco de dados...');

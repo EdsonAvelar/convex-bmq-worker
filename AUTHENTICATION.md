@@ -231,17 +231,17 @@ curl -X POST http://localhost:3002/queue/webhooks/add \
 
 ## 🔐 Resumo de Segurança
 
-| Endpoint                     | Direção          | Autenticação          | Segurança                 | Header                                   |
-| ---------------------------- | ---------------- | --------------------- | ------------------------- | ---------------------------------------- |
-| `/queue/webhooks/add`        | Next.js → Worker | ✅ HMAC **ou** Bearer | ⭐⭐⭐ HMAC / ⭐⭐ Bearer | `X-Webhook-Signature` ou `Authorization` |
-| `/api/queue/callback`        | Worker → Next.js | ✅ HMAC SHA-256       | ⭐⭐⭐                    | `X-Webhook-Signature`                    |
-| `/api/internal/webhook-logs` | Worker → Next.js | ✅ HMAC SHA-256       | ⭐⭐⭐                    | `X-Webhook-Signature`                    |
+| Endpoint                     | Direção          | Autenticação    | Header          |
+| ---------------------------- | ---------------- | --------------- | --------------- |
+| `/queue/webhooks/add`        | Next.js → Worker | ✅ Bearer Token | `Authorization` |
+| `/api/queue/callback`        | Worker → Next.js | ✅ Bearer Token | `Authorization` |
+| `/api/internal/webhook-logs` | Worker → Next.js | ✅ Bearer Token | `Authorization` |
 
 ### **Recomendações:**
 
-- **Produção:** Use **HMAC** em todos os endpoints
-- **Desenvolvimento/Testes:** Bearer Token é aceitável
+- **Sempre use Bearer Token** no header `Authorization: Bearer <secret>`
 - **Sempre use HTTPS** em produção
+- Use o mesmo `QUEUE_WORKER_SECRET` em ambos os sistemas
 
 ---
 
@@ -352,13 +352,13 @@ curl -X POST http://localhost:3002/queue/webhooks/add \
 
 ## 🔐 Resumo de Segurança
 
-| Endpoint                     | Direção          | Autenticação    | Header                |
-| ---------------------------- | ---------------- | --------------- | --------------------- |
-| `/queue/webhooks/add`        | Next.js → Worker | ✅ HMAC SHA-256 | `X-Webhook-Signature` |
-| `/api/queue/callback`        | Worker → Next.js | ✅ HMAC SHA-256 | `X-Webhook-Signature` |
-| `/api/internal/webhook-logs` | Worker → Next.js | ✅ HMAC SHA-256 | `X-Webhook-Signature` |
+| Endpoint                     | Direção          | Autenticação    | Header          |
+| ---------------------------- | ---------------- | --------------- | --------------- |
+| `/queue/webhooks/add`        | Next.js → Worker | ✅ Bearer Token | `Authorization` |
+| `/api/queue/callback`        | Worker → Next.js | ✅ Bearer Token | `Authorization` |
+| `/api/internal/webhook-logs` | Worker → Next.js | ✅ Bearer Token | `Authorization` |
 
-**Todos os endpoints agora protegidos com HMAC!** 🎉
+**Todos os endpoints agora protegidos com Bearer Token!** 🎉
 
 ---
 

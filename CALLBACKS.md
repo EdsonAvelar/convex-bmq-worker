@@ -22,7 +22,7 @@ Interfaces TypeScript padronizadas:
 
 Módulo responsável por enviar callbacks:
 
-- ✅ Gera HMAC SHA-256 signature (`X-Webhook-Signature`)
+- ✅ Envia com Bearer Token no header `Authorization`
 - ✅ Retry automático com exponential backoff (3 tentativas)
 - ✅ Timeout de 10s por tentativa
 - ✅ Logging estruturado JSON
@@ -89,14 +89,14 @@ Módulo responsável por enviar callbacks:
 
 ---
 
-## 🔐 Segurança: HMAC Signature
+## 🔐 Segurança: Bearer Token
 
 ### Worker envia callback com:
 
 ```http
 POST https://seu-app.com/api/queue/callback
 Content-Type: application/json
-X-Webhook-Signature: abc123... (HMAC SHA-256)
+Authorization: Bearer <QUEUE_WORKER_SECRET>
 
 {
   "jobId": "job_123",
@@ -108,19 +108,17 @@ X-Webhook-Signature: abc123... (HMAC SHA-256)
 ### Next.js valida com:
 
 ```typescript
-import crypto from "crypto";
+const authHeader = req.headers.authorization;
 
-const signature = req.headers["x-webhook-signature"];
-const body = JSON.stringify(req.body);
+if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  return res.status(401).json({ error: 'Missing Bearer Token' });
+}
+
+const token = authHeader.substring(7); // Remove "Bearer "
 const secret = process.env.QUEUE_WORKER_SECRET;
 
-const expectedSignature = crypto
-  .createHmac("sha256", secret)
-  .update(body)
-  .digest("hex");
-
-if (signature !== expectedSignature) {
-  return res.status(401).json({ error: "Invalid signature" });
+if (token !== secret) {
+  return res.status(401).json({ error: "Invalid Bearer Token" });
 }
 ```
 
@@ -278,7 +276,7 @@ docker-compose logs -f worker
 ## ✅ Checklist de Implementação
 
 - [x] Criar `src/lib/types.ts` com interfaces padronizadas
-- [x] Criar `src/lib/callbackSender.ts` com HMAC e retry
+- [x] Criar `src/lib/callbackSender.ts` com Bearer Token e retry
 - [x] Atualizar `webhookWorker.ts` para enviar callbacks
 - [x] Atualizar endpoint `/queue/webhooks/add` para aceitar ambos formatos
 - [x] Validar variável `QUEUE_WORKER_SECRET` (já existe)
@@ -294,8 +292,8 @@ docker-compose logs -f worker
 
 1. ✅ Next.js enfileira job com callback URL
 2. ✅ Worker processa job (webhook, email, etc)
-3. ✅ Worker envia callback com HMAC para Next.js
-4. ✅ Next.js valida HMAC e salva log no banco
+3. ✅ Worker envia callback com Bearer Token para Next.js
+4. ✅ Next.js valida Bearer Token e salva log no banco
 5. ✅ Retry automático em ambos os lados
 
 **Pronto para produção!** 🎉

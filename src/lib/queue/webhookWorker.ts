@@ -111,13 +111,14 @@ async function saveWebhookLog(logData: {
 
   // ✅ APP_URL é OPCIONAL - se não configurado, apenas não salva o log antigo
   if (!apiUrl) {
-    console.warn(
+    console.log(
       JSON.stringify({
         timestamp: new Date().toISOString(),
-        level: "warn",
+        level: "info",
         service: "webhook-logger",
-        event: "app_url_not_configured",
-        message: "APP_URL not set - skipping legacy webhook log save",
+        event: "legacy_log_skipped",
+        message:
+          "APP_URL not configured - legacy webhook log not saved (callback system is being used)",
         tenant_id: logData.tenantId,
         integration_id: logData.integrationId,
       })
@@ -127,14 +128,14 @@ async function saveWebhookLog(logData: {
 
   // ✅ QUEUE_WORKER_SECRET também é opcional para saveWebhookLog
   if (!apiSecret) {
-    console.warn(
+    console.log(
       JSON.stringify({
         timestamp: new Date().toISOString(),
-        level: "warn",
+        level: "info",
         service: "webhook-logger",
-        event: "worker_secret_not_configured",
+        event: "legacy_log_skipped",
         message:
-          "QUEUE_WORKER_SECRET not set - skipping legacy webhook log save",
+          "QUEUE_WORKER_SECRET not configured - legacy webhook log not saved",
         tenant_id: logData.tenantId,
         integration_id: logData.integrationId,
       })
@@ -415,6 +416,26 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
               );
             }
           );
+        } else {
+          // ⚠️ Callback não enviado - URL ou secret não fornecidos
+          console.warn(
+            JSON.stringify({
+              timestamp: new Date().toISOString(),
+              level: "warn",
+              service: "webhook-worker",
+              event: "callback_not_sent",
+              reason: !callbackUrl
+                ? "callback_url_not_provided"
+                : "callback_secret_not_provided",
+              queue: "webhooks",
+              job_id: jobId,
+              tenant_id: tenantId,
+              integration_id: integrationId,
+              webhook_status: "success",
+              message:
+                "Job completado com sucesso mas callback não foi enviado (URL ou secret não fornecidos no payload)",
+            })
+          );
         }
       } else {
         // ✅ Registrar falha no circuit breaker
@@ -577,6 +598,29 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
               })
             );
           }
+        );
+      } else {
+        // ⚠️ Callback não enviado - URL ou secret não fornecidos
+        const willRetry = attemptNumber < maxAttempts;
+        console.warn(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "warn",
+            service: "webhook-worker",
+            event: "callback_not_sent",
+            reason: !callbackUrl
+              ? "callback_url_not_provided"
+              : "callback_secret_not_provided",
+            queue: "webhooks",
+            job_id: jobId,
+            tenant_id: tenantId,
+            integration_id: integrationId,
+            webhook_status: willRetry ? "retrying" : "failed",
+            error_category: errorCategory,
+            message: `Job ${
+              willRetry ? "vai fazer retry" : "falhou permanentemente"
+            } mas callback não foi enviado (URL ou secret não fornecidos no payload)`,
+          })
         );
       }
 
