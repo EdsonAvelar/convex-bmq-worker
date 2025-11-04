@@ -1,20 +1,41 @@
 // src/lib/queue/webhookWorker.ts
 import { Job } from "bullmq";
 import { BaseWorker } from "./BaseWorker";
+import { sendCallback } from "../callbackSender";
+import { WorkerCallbackPayload } from "../types";
 
 /**
  * Dados específicos para jobs de webhook
+ * ✅ ATUALIZADO: Suporta formato antigo E novo (destination/callback)
  */
 export interface WebhookJobData {
+  // Campos obrigatórios (compatibilidade retroativa)
   tenantId: number;
-  integrationId: number;
-  integrationName: string;
+  integrationId?: number; // ✅ Agora opcional (para emails, etc)
+  integrationName?: string;
   negocioId?: number;
-  url: string;
-  method: string;
-  headers: Record<string, string>;
-  body: any;
+
+  // Formato ANTIGO (compatibilidade retroativa)
+  url?: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: any;
   timestamp?: string;
+
+  // 🆕 Formato NOVO (padronizado)
+  jobType?: "webhook" | "email" | "sms" | "notification";
+  destination?: {
+    url: string;
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+    headers?: Record<string, string>;
+    body?: any;
+    timeout?: number;
+  };
+  callback?: {
+    url: string; // URL enviada pelo Next.js
+    secret?: string; // HMAC específico (opcional)
+  };
+  metadata?: Record<string, any>;
 }
 
 /**
@@ -69,9 +90,10 @@ const circuitBreaker = new WebhookCircuitBreaker();
 
 /**
  * Salva log de webhook via API interna com timeout robusto e AbortController
+ * ✅ ATUALIZADO: integrationId agora é opcional (para emails, SMS, etc)
  */
 async function saveWebhookLog(logData: {
-  integrationId: number;
+  integrationId?: number;
   negocioId?: number;
   tenantId: number;
   url: string;
@@ -85,15 +107,17 @@ async function saveWebhookLog(logData: {
   attemptNumber: number;
 }): Promise<void> {
   const apiUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL;
-  const apiSecret = process.env.INTERNAL_API_SECRET;
+  const apiSecret = process.env.QUEUE_WORKER_SECRET;
 
+  // ✅ APP_URL é OPCIONAL - se não configurado, apenas não salva o log antigo
   if (!apiUrl) {
-    console.error(
+    console.warn(
       JSON.stringify({
         timestamp: new Date().toISOString(),
-        level: "error",
+        level: "warn",
         service: "webhook-logger",
-        event: "missing_app_url",
+        event: "app_url_not_configured",
+        message: "APP_URL not set - skipping legacy webhook log save",
         tenant_id: logData.tenantId,
         integration_id: logData.integrationId,
       })
@@ -101,13 +125,16 @@ async function saveWebhookLog(logData: {
     return;
   }
 
+  // ✅ QUEUE_WORKER_SECRET também é opcional para saveWebhookLog
   if (!apiSecret) {
-    console.error(
+    console.warn(
       JSON.stringify({
         timestamp: new Date().toISOString(),
-        level: "error",
+        level: "warn",
         service: "webhook-logger",
-        event: "missing_api_secret",
+        event: "worker_secret_not_configured",
+        message:
+          "QUEUE_WORKER_SECRET not set - skipping legacy webhook log save",
         tenant_id: logData.tenantId,
         integration_id: logData.integrationId,
       })
@@ -122,13 +149,15 @@ async function saveWebhookLog(logData: {
   try {
     const startTime = Date.now();
 
+    const bodyData = JSON.stringify(logData);
+
     const response = await fetch(`${apiUrl}/api/internal/webhook-logs`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-internal-secret": apiSecret,
+        Authorization: `Bearer ${apiSecret}`, // ✅ Bearer Token
       },
-      body: JSON.stringify(logData),
+      body: bodyData,
       signal: controller.signal,
     });
 
@@ -201,20 +230,32 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
   }
 
   protected async processJob(job: Job<WebhookJobData>): Promise<any> {
-    const {
-      integrationId,
-      integrationName,
-      url,
-      method,
-      headers,
-      body,
-      tenantId,
-      negocioId,
-    } = job.data;
+    // ✅ Normalizar payload (suportar formato antigo E novo)
+    const isNewFormat = !!job.data.destination;
+
+    const { tenantId, integrationId, integrationName, negocioId, metadata } =
+      job.data;
+
+    // Extrair destination (novo formato) ou usar campos antigos
+    const url = isNewFormat ? job.data.destination!.url : job.data.url!;
+    const method = isNewFormat
+      ? job.data.destination!.method
+      : job.data.method || "POST";
+    const headers = isNewFormat
+      ? job.data.destination!.headers || {}
+      : job.data.headers || {};
+    const body = isNewFormat ? job.data.destination!.body : job.data.body;
+    const jobType = job.data.jobType || "webhook";
+
+    // Extrair callback URL (se existir)
+    const callbackUrl = job.data.callback?.url;
+    const callbackSecret =
+      job.data.callback?.secret || process.env.QUEUE_WORKER_SECRET || "";
 
     const attemptNumber = job.attemptsMade + 1;
     const maxAttempts = job.opts.attempts || 5;
     const jobId = job.id || "unknown";
+    const startedAt = new Date();
 
     // ✅ Verificar circuit breaker
     if (circuitBreaker.isOpen()) {
@@ -330,6 +371,51 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
             max_attempts: maxAttempts,
           })
         );
+
+        // 🆕 ENVIAR CALLBACK DE SUCESSO
+        if (callbackUrl && callbackSecret) {
+          const callbackPayload: WorkerCallbackPayload = {
+            jobId,
+            jobType: jobType as any,
+            tenantId,
+            integrationId,
+            negocioId,
+            status: "success",
+            success: true,
+            destination: {
+              url,
+              method,
+              statusCode,
+              headers: Object.fromEntries(response.headers.entries()),
+              body: responseBody,
+              duration,
+            },
+            execution: {
+              attempt: attemptNumber,
+              maxAttempts,
+              startedAt: startedAt.toISOString(),
+              completedAt: new Date().toISOString(),
+              duration,
+            },
+            metadata,
+          };
+
+          // Enviar callback (não bloquear o job se falhar)
+          sendCallback(callbackPayload, callbackUrl, callbackSecret).catch(
+            (err) => {
+              console.error(
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  level: "error",
+                  service: "webhook-worker",
+                  event: "callback_send_failed",
+                  job_id: jobId,
+                  error: err.message,
+                })
+              );
+            }
+          );
+        }
       } else {
         // ✅ Registrar falha no circuit breaker
         circuitBreaker.recordFailure();
@@ -356,7 +442,7 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
 
       // Salvar log via API interna
       await saveWebhookLog({
-        integrationId,
+        integrationId: integrationId || undefined,
         negocioId: negocioId || undefined,
         tenantId,
         url,
@@ -419,7 +505,7 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
 
       // Salvar erro via API interna
       await saveWebhookLog({
-        integrationId,
+        integrationId: integrationId || undefined,
         negocioId: negocioId || undefined,
         tenantId,
         url,
@@ -432,6 +518,67 @@ class WebhookWorker extends BaseWorker<WebhookJobData> {
         duration,
         attemptNumber,
       });
+
+      // 🆕 ENVIAR CALLBACK DE ERRO/RETRY
+      if (callbackUrl && callbackSecret) {
+        const willRetry = attemptNumber < maxAttempts;
+        const isRetryable = [
+          "TIMEOUT",
+          "CONNECTION_FAILED",
+          "DNS_ERROR",
+          "CONNECTION_REFUSED",
+        ].includes(errorCategory);
+
+        const callbackPayload: WorkerCallbackPayload = {
+          jobId,
+          jobType: jobType as any,
+          tenantId,
+          integrationId,
+          negocioId,
+          status: willRetry ? "retrying" : "failed",
+          success: false,
+          destination: {
+            url,
+            method,
+            statusCode: statusCode || 0,
+            duration,
+          },
+          error: {
+            message: errorMessage || "Unknown error",
+            code: errorCategory,
+            isRetryable,
+          },
+          execution: {
+            attempt: attemptNumber,
+            maxAttempts,
+            startedAt: startedAt.toISOString(),
+            completedAt: new Date().toISOString(),
+            duration,
+            nextRetryAt: willRetry
+              ? new Date(
+                  Date.now() + Math.pow(2, attemptNumber) * 2000
+                ).toISOString()
+              : undefined,
+          },
+          metadata,
+        };
+
+        // Enviar callback (não bloquear o job se falhar)
+        sendCallback(callbackPayload, callbackUrl, callbackSecret).catch(
+          (err) => {
+            console.error(
+              JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: "error",
+                service: "webhook-worker",
+                event: "callback_send_failed",
+                job_id: jobId,
+                error: err.message,
+              })
+            );
+          }
+        );
+      }
 
       // Re-throw para BullMQ fazer retry
       throw error;

@@ -347,6 +347,100 @@ function createHealthServer(port: number = 3002) {
 
       req.on("end", async () => {
         try {
+          // 🔐 VALIDAR AUTENTICAÇÃO (suporta Bearer Token OU HMAC)
+          const authHeader = req.headers["authorization"] as string;
+          const hmacSignature = req.headers["x-webhook-signature"] as string;
+          const secret = process.env.QUEUE_WORKER_SECRET;
+
+          if (!secret) {
+            console.error(
+              JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: "error",
+                service: "api",
+                event: "queue_add_no_secret_configured",
+              })
+            );
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "Server configuration error",
+              })
+            );
+            return;
+          }
+
+          // Validar autenticação (aceita Bearer Token OU HMAC)
+          let authenticated = false;
+
+          // Opção 1: HMAC Signature (RECOMENDADO - mais seguro)
+          if (hmacSignature) {
+            const crypto = await import("crypto");
+            const expectedSignature = crypto
+              .createHmac("sha256", secret)
+              .update(body)
+              .digest("hex");
+
+            // Timing-safe comparison
+            try {
+              authenticated = crypto.timingSafeEqual(
+                Buffer.from(hmacSignature),
+                Buffer.from(expectedSignature)
+              );
+            } catch {
+              authenticated = false;
+            }
+
+            if (!authenticated) {
+              console.error(
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  level: "error",
+                  service: "api",
+                  event: "queue_add_invalid_hmac",
+                })
+              );
+            }
+          }
+          // Opção 2: Bearer Token (compatibilidade - menos seguro)
+          else if (authHeader && authHeader.startsWith("Bearer ")) {
+            const token = authHeader.substring(7);
+            authenticated = token === secret;
+
+            if (!authenticated) {
+              console.error(
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  level: "error",
+                  service: "api",
+                  event: "queue_add_invalid_bearer_token",
+                })
+              );
+            }
+          }
+
+          // Se nenhuma autenticação fornecida ou ambas inválidas
+          if (!authenticated) {
+            console.error(
+              JSON.stringify({
+                timestamp: new Date().toISOString(),
+                level: "error",
+                service: "api",
+                event: "queue_add_unauthorized",
+                has_bearer: !!authHeader,
+                has_hmac: !!hmacSignature,
+              })
+            );
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error:
+                  "Unauthorized. Use: Authorization: Bearer <token> OR X-Webhook-Signature: <hmac>",
+              })
+            );
+            return;
+          }
+
           const data = JSON.parse(body);
 
           // ✅ LOG: Sempre logar payload recebido para debug
@@ -361,26 +455,18 @@ function createHealthServer(port: number = 3002) {
             })
           );
 
-          // Validação básica conforme WebhookJobData
-          if (
-            !data.tenantId ||
-            !data.integrationId ||
-            !data.url ||
-            !data.method
-          ) {
-            // ✅ LOG: Logar validação falhou com detalhes
+          // 🆕 Detectar formato (antigo ou novo)
+          const isNewFormat = !!data.destination;
+
+          // Validação básica (suporta AMBOS os formatos)
+          if (!data.tenantId) {
             console.error(
               JSON.stringify({
                 timestamp: new Date().toISOString(),
                 level: "error",
                 service: "api",
                 event: "webhook_validation_failed",
-                received_fields: {
-                  tenantId: !!data.tenantId,
-                  integrationId: !!data.integrationId,
-                  url: !!data.url,
-                  method: !!data.method,
-                },
+                error: "Missing tenantId",
                 payload: data,
               })
             );
@@ -388,13 +474,68 @@ function createHealthServer(port: number = 3002) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(
               JSON.stringify({
-                error:
-                  "Missing required fields: tenantId, integrationId, url, method",
-                received: Object.keys(data),
-                expected: ["tenantId", "integrationId", "url", "method"],
+                error: "Missing required field: tenantId",
               })
             );
             return;
+          }
+
+          // Validar campos obrigatórios conforme formato
+          if (isNewFormat) {
+            // Formato NOVO: destination obrigatório
+            if (!data.destination?.url || !data.destination?.method) {
+              console.error(
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  level: "error",
+                  service: "api",
+                  event: "webhook_validation_failed",
+                  error:
+                    "New format missing destination.url or destination.method",
+                  payload: data,
+                })
+              );
+
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({
+                  error:
+                    "Missing required fields: destination.url, destination.method",
+                })
+              );
+              return;
+            }
+          } else {
+            // Formato ANTIGO: url, method, integrationId obrigatórios
+            if (!data.integrationId || !data.url || !data.method) {
+              console.error(
+                JSON.stringify({
+                  timestamp: new Date().toISOString(),
+                  level: "error",
+                  service: "api",
+                  event: "webhook_validation_failed",
+                  error: "Old format missing integrationId, url or method",
+                  received_fields: {
+                    tenantId: !!data.tenantId,
+                    integrationId: !!data.integrationId,
+                    url: !!data.url,
+                    method: !!data.method,
+                  },
+                  payload: data,
+                })
+              );
+
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({
+                  error:
+                    "Missing required fields: tenantId, integrationId, url, method",
+                  received: Object.keys(data),
+                  expected: ["tenantId", "integrationId", "url", "method"],
+                })
+              );
+              return;
+            }
           }
 
           // Adicionar job na fila com estrutura WebhookJobData
@@ -402,16 +543,39 @@ function createHealthServer(port: number = 3002) {
           const redis = getRedisSingleton();
           const queue = new Queue("webhooks", { connection: redis });
 
-          const job = await queue.add("webhook", {
-            tenantId: data.tenantId,
-            integrationId: data.integrationId,
-            integrationName: data.integrationName || "Webhook",
-            negocioId: data.negocioId,
-            url: data.url,
-            method: data.method,
-            headers: data.headers || {},
-            body: data.body || {},
-            timestamp: new Date().toISOString(),
+          // 🆕 Payload normalizado (suporta AMBOS os formatos)
+          const jobPayload = isNewFormat
+            ? {
+                // Formato NOVO
+                tenantId: data.tenantId,
+                integrationId: data.integrationId,
+                integrationName: data.integrationName,
+                negocioId: data.negocioId,
+                jobType: data.jobType || "webhook",
+                destination: data.destination,
+                callback: data.callback,
+                metadata: data.metadata,
+                timestamp: new Date().toISOString(),
+              }
+            : {
+                // Formato ANTIGO (compatibilidade retroativa)
+                tenantId: data.tenantId,
+                integrationId: data.integrationId,
+                integrationName: data.integrationName || "Webhook",
+                negocioId: data.negocioId,
+                url: data.url,
+                method: data.method,
+                headers: data.headers || {},
+                body: data.body || {},
+                timestamp: new Date().toISOString(),
+              };
+
+          const job = await queue.add("webhook", jobPayload, {
+            attempts: data.options?.retries || 5,
+            backoff: {
+              type: "exponential",
+              delay: data.options?.backoff || 2000,
+            },
           });
 
           await queue.close();
@@ -425,7 +589,8 @@ function createHealthServer(port: number = 3002) {
               job_id: job.id,
               tenant_id: data.tenantId,
               integration_id: data.integrationId,
-              webhook_url: data.url,
+              webhook_url: isNewFormat ? data.destination.url : data.url,
+              format: isNewFormat ? "new" : "old",
             })
           );
 
@@ -850,12 +1015,10 @@ async function main() {
 
   try {
     // 1. Verificar variáveis de ambiente obrigatórias
-    const requiredEnvs = ["INTERNAL_API_SECRET"];
+    const requiredEnvs = ["QUEUE_WORKER_SECRET"];
 
-    const appUrl = process.env.APP_URL || process.env.NEXT_PUBLIC_APP_URL;
-    if (!appUrl) {
-      requiredEnvs.push("APP_URL ou NEXT_PUBLIC_APP_URL");
-    }
+    // ✅ APP_URL não é mais obrigatória (apenas para legacy webhook logs)
+    // Se não configurada, o worker funciona normalmente, apenas não salva logs antigos
 
     const hasTcpRedis = Boolean(
       process.env.UPSTASH_REDIS_URL || process.env.REDIS_URL
@@ -883,7 +1046,11 @@ async function main() {
         service: "main",
         event: "environment_validated",
         redis_source: hasTcpRedis ? "tcp_url" : "rest_derived",
-        app_url: appUrl,
+        app_url:
+          process.env.APP_URL ||
+          process.env.NEXT_PUBLIC_APP_URL ||
+          "not_configured",
+        queue_worker_secret_set: !!process.env.QUEUE_WORKER_SECRET,
       })
     );
 

@@ -7,7 +7,7 @@ Worker BullMQ standalone para processamento de filas (webhooks, emails, notifica
 **O worker NÃO tem acesso direto ao banco de dados!**
 
 - ✅ Worker processa webhooks e envia logs via API interna
-- ✅ Apenas 1 secret compartilhado (`INTERNAL_API_SECRET`)
+- ✅ Apenas 1 secret compartilhado (`QUEUE_WORKER_SECRET`)
 - ✅ API route `/api/internal/webhook-logs` no Next.js persiste dados
 - ✅ Railway não precisa de credenciais do banco
 - ✅ Isolamento total de dados sensíveis
@@ -24,7 +24,7 @@ Worker BullMQ standalone para processamento de filas (webhooks, emails, notifica
 └─────────────────┘          └──────────────────┘          └─────────────┘
      ▲                              │
      │                              │
-     └────shares INTERNAL_API_SECRET┘
+     └────shares QUEUE_WORKER_SECRET┘
 ```
 
 ## 📦 Estrutura do Projeto
@@ -81,7 +81,7 @@ APP_URL=https://your-app.vercel.app
 
 # Secret compartilhado - OBRIGATÓRIO
 # Gere um com: openssl rand -hex 32
-INTERNAL_API_SECRET=your_super_secret_token_here
+QUEUE_WORKER_SECRET=your_super_secret_token_here
 
 # Worker Config
 NODE_ENV=production
@@ -92,11 +92,11 @@ WORKER_LOCK_DURATION=120000
 
 ### 3. Configurar secret no Next.js (Vercel)
 
-**IMPORTANTE**: O mesmo `INTERNAL_API_SECRET` deve estar na Vercel:
+**IMPORTANTE**: O mesmo `QUEUE_WORKER_SECRET` deve estar na Vercel:
 
 ```bash
 # Na Vercel (Settings → Environment Variables)
-INTERNAL_API_SECRET=your_super_secret_token_here
+QUEUE_WORKER_SECRET=your_super_secret_token_here
 ```
 
 ### 4. Testar localmente
@@ -144,13 +144,16 @@ curl http://localhost:3002/health
 
    - Vá em **Variables** no dashboard
    - Adicione as variáveis (SEM `DATABASE_URL`!):
+
      ```
      UPSTASH_REDIS_REST_URL
      UPSTASH_REDIS_REST_TOKEN
-     APP_URL=https://your-app.vercel.app
-     INTERNAL_API_SECRET=your_super_secret_token_here
+     QUEUE_WORKER_SECRET=your_super_secret_token_here
      NODE_ENV=production
      PORT=3002
+
+     # Opcional (apenas para legacy webhook logs):
+     # APP_URL=https://your-app.vercel.app
      ```
 
 4. **Deploy automático**:
@@ -245,19 +248,19 @@ npm run test:load
 
 ## 📝 Variáveis de Ambiente
 
-| Variável                   | Obrigatório | Default      | Descrição                           |
-| -------------------------- | ----------- | ------------ | ----------------------------------- |
-| `UPSTASH_REDIS_REST_URL`   | ✅          | -            | URL do Upstash Redis                |
-| `UPSTASH_REDIS_REST_TOKEN` | ✅          | -            | Token do Upstash Redis              |
-| `APP_URL`                  | ✅          | -            | URL do Next.js (Vercel)             |
-| `INTERNAL_API_SECRET`      | ✅          | -            | Secret compartilhado (min 32 chars) |
-| `NODE_ENV`                 | ❌          | `production` | Ambiente de execução                |
-| `PORT`                     | ❌          | `3002`       | Porta do health server              |
-| `WORKER_CONCURRENCY`       | ❌          | `5`          | Jobs simultâneos                    |
-| `WORKER_LOCK_DURATION`     | ❌          | `120000`     | Lock duration em ms                 |
-| `TZ`                       | ❌          | `UTC`        | Timezone                            |
+| Variável                   | Obrigatório | Default      | Descrição                                |
+| -------------------------- | ----------- | ------------ | ---------------------------------------- |
+| `UPSTASH_REDIS_REST_URL`   | ✅          | -            | URL do Upstash Redis                     |
+| `UPSTASH_REDIS_REST_TOKEN` | ✅          | -            | Token do Upstash Redis                   |
+| `QUEUE_WORKER_SECRET`      | ✅          | -            | Secret compartilhado (min 32 chars)      |
+| `APP_URL`                  | ❌          | -            | URL do Next.js (apenas para legacy logs) |
+| `NODE_ENV`                 | ❌          | `production` | Ambiente de execução                     |
+| `PORT`                     | ❌          | `3002`       | Porta do health server                   |
+| `WORKER_CONCURRENCY`       | ❌          | `5`          | Jobs simultâneos                         |
+| `WORKER_LOCK_DURATION`     | ❌          | `120000`     | Lock duration em ms                      |
+| `TZ`                       | ❌          | `UTC`        | Timezone                                 |
 
-### 🔐 Gerar INTERNAL_API_SECRET seguro
+### 🔐 Gerar QUEUE_WORKER_SECRET seguro
 
 ```bash
 # Linux/Mac
