@@ -75,6 +75,140 @@ export function getRedisMetrics() {
 }
 
 // ============================================================================
+// Connection diagnostics helpers
+// ============================================================================
+
+function maskPassword(url: string | undefined) {
+  if (!url) return undefined;
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = "***";
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+function classifyRedisError(err: any): { reason: string; hint?: string } {
+  const msg = (err?.message || "").toUpperCase();
+  const code = (err?.code || "").toUpperCase();
+
+  if (msg.includes("WRONGPASS") || msg.includes("NOAUTH"))
+    return {
+      reason: "AUTHENTICATION_FAILED",
+      hint: "Check REDIS_URL username/password",
+    };
+  if (code === "ECONNREFUSED")
+    return {
+      reason: "CONNECTION_REFUSED",
+      hint: "Host/port unreachable or service down",
+    };
+  if (code === "ETIMEDOUT" || msg.includes("TIMED OUT"))
+    return {
+      reason: "CONNECTION_TIMEOUT",
+      hint: "Network latency or provider blocking long polls",
+    };
+  if (code === "ENOTFOUND")
+    return {
+      reason: "DNS_NOT_FOUND",
+      hint: "Invalid hostname or DNS resolution failed",
+    };
+  if (msg.includes("SELF_SIGNED") || msg.includes("CERT"))
+    return {
+      reason: "TLS_CERTIFICATE_ERROR",
+      hint: "rediss:// with invalid certificate. Try redis:// or configure CA",
+    };
+  if (msg.includes("READONLY"))
+    return {
+      reason: "READONLY_REPLICA",
+      hint: "Connected to replica; ensure primary or disable read-only",
+    };
+  if (msg.includes("MOVED") || msg.includes("ASK"))
+    return {
+      reason: "CLUSTER_REDIRECT",
+      hint: "Cluster wants redirection; prefer single-node for BullMQ",
+    };
+
+  return { reason: code || "UNKNOWN", hint: "See error.message for details" };
+}
+
+function baseClientInfo(opts: IORedisOptions) {
+  return {
+    host: opts.host,
+    port: opts.port,
+    username: opts.username,
+    tls: Boolean((opts as any).tls),
+    family: opts.family,
+    enableOfflineQueue: opts.enableOfflineQueue,
+    enableReadyCheck: (opts as any).enableReadyCheck,
+    lazyConnect: (opts as any).lazyConnect,
+    commandTimeout: (opts as any).commandTimeout ?? undefined,
+  };
+}
+
+/**
+ * Executa um diagnóstico rápido de conectividade Redis
+ */
+export async function redisDiagnostics() {
+  const envTarget = maskPassword(
+    process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL
+  );
+  let opts: IORedisOptions | null = null;
+  let result: any = {};
+
+  try {
+    opts = getRedisBaseOptions();
+    const temp = new IORedis({
+      ...opts,
+      // Safe probes
+      lazyConnect: false,
+      enableReadyCheck: false,
+      maxRetriesPerRequest: 1,
+      commandTimeout: 5000,
+    } as IORedisOptions);
+
+    const start = Date.now();
+    await temp.ping();
+    const rtt = Date.now() - start;
+
+    let redisVersion: string | undefined;
+    try {
+      redisVersion = (temp as any).serverInfo?.redis_version;
+    } catch {}
+
+    result = {
+      ok: true,
+      rtt_ms: rtt,
+      redis_version: redisVersion,
+    };
+
+    await temp.quit();
+  } catch (err: any) {
+    const { reason, hint } = classifyRedisError(err);
+    result = {
+      ok: false,
+      reason,
+      hint,
+      message: err?.message,
+      code: err?.code,
+      errno: err?.errno,
+      syscall: err?.syscall,
+      address: err?.address,
+      port: err?.port,
+    };
+  }
+
+  return {
+    env: {
+      REDIS_URL: maskPassword(process.env.REDIS_URL),
+      UPSTASH_REDIS_URL: maskPassword(process.env.UPSTASH_REDIS_URL),
+    },
+    target: opts ? baseClientInfo(opts) : null,
+    result,
+  };
+}
+
+// ============================================================================
 // Factory para clientes ioredis (resolve "Command timed out")
 // ============================================================================
 
@@ -95,6 +229,18 @@ export function getRedisBaseOptions(): IORedisOptions {
       console.log(
         `🔧 [Redis Factory] Usando TCP URL: ${u.hostname}:${u.port || 6379}`
       );
+      if (u.hostname.includes("upstash.io")) {
+        console.warn(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "warn",
+            service: "redis-factory",
+            event: "provider_notice",
+            provider: "upstash",
+            note: "Blocking commands may time out on some serverless providers",
+          })
+        );
+      }
 
       const baseOptions: IORedisOptions = {
         host: u.hostname,
@@ -152,6 +298,18 @@ export function getRedisBaseOptions(): IORedisOptions {
 
   const hostname = restUrl.replace("https://", "");
   console.log(`🔧 [Redis Factory] Derivando TCP de REST: ${hostname}:6379`);
+  if (hostname.includes("upstash.io")) {
+    console.warn(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        service: "redis-factory",
+        event: "provider_notice",
+        provider: "upstash",
+        note: "Blocking commands may time out on some serverless providers",
+      })
+    );
+  }
 
   const baseOptions: IORedisOptions = {
     host: hostname,
@@ -222,6 +380,80 @@ export function createRedisClient(): IORedis {
     return originalSendCommand(command, ...args);
   };
 
+  // 🔧 Eventos com logs ricos
+  client.on("connect", () => {
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "redis-client",
+        event: "connected",
+        info: baseClientInfo(opts),
+      })
+    );
+  });
+
+  client.on("ready", () => {
+    const version = (client as any).serverInfo?.redis_version;
+    console.log(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        service: "redis-client",
+        event: "ready",
+        redis_version: version || undefined,
+      })
+    );
+  });
+
+  client.on("reconnecting", (delay: number) => {
+    console.warn(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        service: "redis-client",
+        event: "reconnecting",
+        delay_ms: delay,
+      })
+    );
+  });
+
+  client.on("close", () => {
+    console.warn(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        service: "redis-client",
+        event: "closed",
+      })
+    );
+  });
+
+  client.on("error", (err: any) => {
+    const { reason, hint } = classifyRedisError(err);
+    console.error(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        service: "redis-client",
+        event: "error",
+        reason,
+        hint,
+        message: err?.message,
+        code: err?.code,
+        errno: err?.errno,
+        syscall: err?.syscall,
+        address: err?.address,
+        port: err?.port,
+        info: baseClientInfo(opts),
+        env: {
+          REDIS_URL: maskPassword(process.env.REDIS_URL),
+          UPSTASH_REDIS_URL: maskPassword(process.env.UPSTASH_REDIS_URL),
+        },
+      })
+    );
+  });
+
   return client;
 }
 
@@ -291,13 +523,49 @@ export function createBlockingRedisClient(): IORedis {
   });
 
   client.on("error", (err: any) => {
+    const { reason, hint } = classifyRedisError(err);
     console.error(
       JSON.stringify({
         timestamp: new Date().toISOString(),
         level: "error",
         service: "redis-blocking",
         event: "error",
-        error: err.message,
+        reason,
+        hint,
+        message: err?.message,
+        code: err?.code,
+        errno: err?.errno,
+        syscall: err?.syscall,
+        address: err?.address,
+        port: err?.port,
+        info: baseClientInfo(blockingOptions),
+        env: {
+          REDIS_URL: maskPassword(process.env.REDIS_URL),
+          UPSTASH_REDIS_URL: maskPassword(process.env.UPSTASH_REDIS_URL),
+        },
+      })
+    );
+  });
+
+  client.on("reconnecting", (delay: number) => {
+    console.warn(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        service: "redis-blocking",
+        event: "reconnecting",
+        delay_ms: delay,
+      })
+    );
+  });
+
+  client.on("close", () => {
+    console.warn(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "warn",
+        service: "redis-blocking",
+        event: "closed",
       })
     );
   });
@@ -358,13 +626,25 @@ export function getRedisSingleton(): IORedis {
   });
 
   singleton.on("error", (err: any) => {
+    const { reason, hint } = classifyRedisError(err);
     console.error(
       JSON.stringify({
         timestamp: new Date().toISOString(),
         level: "error",
         service: "redis-singleton",
         event: "error",
-        error: err.message,
+        reason,
+        hint,
+        message: err?.message,
+        code: err?.code,
+        errno: err?.errno,
+        syscall: err?.syscall,
+        address: err?.address,
+        port: err?.port,
+        env: {
+          REDIS_URL: maskPassword(process.env.REDIS_URL),
+          UPSTASH_REDIS_URL: maskPassword(process.env.UPSTASH_REDIS_URL),
+        },
       })
     );
   });

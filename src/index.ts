@@ -19,6 +19,7 @@ import {
   waitForReady,
   pingRedisSafe,
   getRedisMetrics,
+  redisDiagnostics,
 } from "./lib/queue/connection";
 
 // ============================================================================
@@ -827,6 +828,30 @@ function createHealthServer(port: number = 3002) {
         res.end(
           JSON.stringify({
             error: "Failed to get metrics",
+            message: error.message,
+          })
+        );
+      }
+      return;
+    }
+
+    // ✅ GET /redis/diagnostics - Diagnóstico detalhado de conexão Redis
+    if (path === "/redis/diagnostics" && req.method === "GET") {
+      try {
+        const diag = await redisDiagnostics();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify(
+            { timestamp: new Date().toISOString(), ...diag },
+            null,
+            2
+          )
+        );
+      } catch (error: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "diagnostics_failed",
             message: error.message,
           })
         );
