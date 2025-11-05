@@ -596,12 +596,13 @@ function createHealthServer(port: number = 3002) {
             })
           );
 
-          res.writeHead(201, { "Content-Type": "application/json" });
+          // Return 202 Accepted to indicate asynchronous processing
+          res.writeHead(202, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
               success: true,
               jobId: job.id,
-              message: "Webhook job added to queue",
+              message: "Webhook job accepted for processing",
             })
           );
         } catch (error: any) {

@@ -29,11 +29,11 @@ curl -X POST http://localhost:3002/queue/webhooks/add \
     }
   }'
 
-# Resposta:
+# Resposta (202 Accepted):
 {
   "success": true,
   "jobId": "123",
-  "message": "Webhook job added to queue"
+  "message": "Webhook job accepted for processing"
 }
 ```
 
