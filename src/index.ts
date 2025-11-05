@@ -229,6 +229,29 @@ function createHealthServer(port: number = 3002) {
     const urlObj = new URL(req.url || "/", "http://localhost");
     const path = urlObj.pathname.replace(/\/$/, "");
 
+    // ✅ Root endpoint - /
+    if (path === "" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          service: "convex-bmq-worker",
+          status: "ok",
+          endpoints: [
+            "/health",
+            "/ready",
+            "/live",
+            "/metrics",
+            "/queue/health",
+            "/queue/ready",
+            "/queue/live",
+            "/queue/webhooks/add",
+          ],
+          timestamp: new Date().toISOString(),
+        })
+      );
+      return;
+    }
+
     // ✅ Health endpoint - /queue/health
     if (path === "/queue/health" && req.method === "GET") {
       try {
@@ -270,6 +293,27 @@ function createHealthServer(port: number = 3002) {
           JSON.stringify({
             status: "unhealthy",
             error: error instanceof Error ? error.message : String(error),
+          })
+        );
+      }
+      return;
+    }
+
+    // ✅ Health endpoint (alias) - /health
+    if (path === "/health" && req.method === "GET") {
+      try {
+        const health = await getHealthStatus();
+        const statusCode =
+          health.status === "healthy" && health.redis.connected ? 200 : 503;
+
+        res.writeHead(statusCode, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(health, null, 2));
+      } catch (error: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            status: "unhealthy",
+            error: error.message,
           })
         );
       }
@@ -332,8 +376,32 @@ function createHealthServer(port: number = 3002) {
       return;
     }
 
+    // ✅ Readiness endpoint (alias) - /ready
+    if (path === "/ready" && req.method === "GET") {
+      try {
+        const health = await getHealthStatus();
+        const isReady = health.status === "healthy" && !isShuttingDown;
+
+        res.writeHead(isReady ? 200 : 503, {
+          "Content-Type": "application/json",
+        });
+        res.end(JSON.stringify({ ready: isReady }));
+      } catch (error) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ready: false }));
+      }
+      return;
+    }
+
     // ✅ Liveness endpoint - /queue/live
     if (path === "/queue/live" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ alive: true }));
+      return;
+    }
+
+    // ✅ Liveness endpoint (alias) - /live
+    if (path === "/live" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ alive: true }));
       return;

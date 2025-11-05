@@ -61,10 +61,13 @@ curl http://localhost:3002/queue/webhooks/stats
 
 ## 🏥 Endpoints de Saúde
 
+Além dos caminhos com prefixo `/queue/*`, estão disponíveis aliases sem prefixo para compatibilidade com plataformas e testes externos.
+
 ### 3. Health Check
 
 ```bash
 GET /queue/health
+GET /health  # alias
 
 # Exemplo:
 curl http://localhost:3002/queue/health
@@ -91,6 +94,7 @@ curl http://localhost:3002/queue/health
 
 ```bash
 GET /queue/ready
+GET /ready  # alias
 
 # Exemplo:
 curl http://localhost:3002/queue/ready
@@ -103,12 +107,27 @@ curl http://localhost:3002/queue/ready
 
 ```bash
 GET /queue/live
+GET /live  # alias
 
 # Exemplo:
 curl http://localhost:3002/queue/live
 
 # Resposta:
 {"alive": true}
+```
+
+### 6. Raiz
+
+```bash
+GET /
+
+# Resposta:
+{
+  "service": "convex-bmq-worker",
+  "status": "ok",
+  "endpoints": ["/health", "/ready", "/live", "/metrics", "/queue/webhooks/add"],
+  "timestamp": "2025-11-05T..."
+}
 ```
 
 ---
