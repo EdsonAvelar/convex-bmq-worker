@@ -233,9 +233,17 @@ export function createBlockingRedisClient(): IORedis {
   const base = getRedisBaseOptions();
 
   // ✅ CRÍTICO: commandTimeout: 0 para comandos bloqueantes
+  // 🔧 Harden: desabilita retry automático e conecta sob demanda
   const blockingOptions: IORedisOptions = {
     ...base,
     commandTimeout: 0,
+    retryStrategy: undefined,
+    reconnectOnError: undefined,
+    enableReadyCheck: false,
+    enableOfflineQueue: false,
+    lazyConnect: true,
+    connectTimeout: 30000,
+    keepAlive: 60000,
   };
 
   console.log(
@@ -247,6 +255,12 @@ export function createBlockingRedisClient(): IORedis {
       host: blockingOptions.host,
       port: blockingOptions.port,
       commandTimeout: blockingOptions.commandTimeout,
+      lazyConnect: blockingOptions.lazyConnect,
+      connectTimeout: blockingOptions.connectTimeout,
+      retryStrategy:
+        blockingOptions.retryStrategy === undefined ? "disabled" : "enabled",
+      reconnectOnError:
+        blockingOptions.reconnectOnError === undefined ? "disabled" : "enabled",
       enableOfflineQueue: blockingOptions.enableOfflineQueue,
     })
   );
