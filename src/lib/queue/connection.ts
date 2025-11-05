@@ -13,6 +13,68 @@ let latencyMonitorStarted = false;
 let latencyMonitorInterval: NodeJS.Timeout | null = null;
 
 // ============================================================================
+// Redis Command Metrics
+// ============================================================================
+
+interface RedisMetrics {
+  totalCommands: number;
+  commandsByType: Map<string, number>;
+  startTime: number;
+  lastCommandAt: number | null;
+}
+
+const redisMetrics: RedisMetrics = {
+  totalCommands: 0,
+  commandsByType: new Map(),
+  startTime: Date.now(),
+  lastCommandAt: null,
+};
+
+/**
+ * Registra comando Redis executado
+ */
+function recordRedisCommand(command: string) {
+  redisMetrics.totalCommands++;
+  redisMetrics.lastCommandAt = Date.now();
+
+  const count = redisMetrics.commandsByType.get(command) || 0;
+  redisMetrics.commandsByType.set(command, count + 1);
+}
+
+/**
+ * Retorna estatísticas de uso do Redis
+ */
+export function getRedisMetrics() {
+  const uptimeMs = Date.now() - redisMetrics.startTime;
+  const uptimeHours = uptimeMs / (1000 * 60 * 60);
+  const commandsPerHour =
+    uptimeHours > 0 ? Math.round(redisMetrics.totalCommands / uptimeHours) : 0;
+  const commandsPerSecond =
+    uptimeMs > 0
+      ? (redisMetrics.totalCommands / (uptimeMs / 1000)).toFixed(2)
+      : "0.00";
+
+  // Top 10 comandos mais usados
+  const topCommands = Array.from(redisMetrics.commandsByType.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([cmd, count]) => ({ command: cmd, count }));
+
+  return {
+    totalCommands: redisMetrics.totalCommands,
+    commandsPerHour,
+    commandsPerSecond: parseFloat(commandsPerSecond),
+    uptimeMs,
+    uptimeHours: uptimeHours.toFixed(2),
+    lastCommandAt: redisMetrics.lastCommandAt
+      ? new Date(redisMetrics.lastCommandAt).toISOString()
+      : null,
+    topCommands,
+    allCommands: Object.fromEntries(redisMetrics.commandsByType),
+  };
+}
+
+// ============================================================================
 // Factory para clientes ioredis (resolve "Command timed out")
 // ============================================================================
 
@@ -21,8 +83,9 @@ let latencyMonitorInterval: NodeJS.Timeout | null = null;
  * Garante que tanto client normal quanto blocking usem as MESMAS opções
  */
 export function getRedisBaseOptions(): IORedisOptions {
-  // Preferir URL TCP direta (mais robusta)
-  const tcpUrl = process.env.UPSTASH_REDIS_URL || process.env.REDIS_URL;
+  // 🔧 PRIORIZAR REDIS_URL (usado no docker-compose local)
+  // UPSTASH_REDIS_URL só deve ser usado em produção (Railway)
+  const tcpUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL;
 
   if (tcpUrl) {
     try {
@@ -148,7 +211,18 @@ export function createRedisClient(): IORedis {
     })
   );
 
-  return new IORedis(opts);
+  const client = new IORedis(opts);
+
+  // 🔧 Interceptar comandos para métricas
+  const originalSendCommand = client.sendCommand.bind(client);
+  client.sendCommand = function (command: any, ...args: any[]) {
+    if (command && command.name) {
+      recordRedisCommand(command.name.toUpperCase());
+    }
+    return originalSendCommand(command, ...args);
+  };
+
+  return client;
 }
 
 /**
@@ -236,6 +310,15 @@ export function getRedisSingleton(): IORedis {
   );
 
   singleton = new IORedis(getRedisBaseOptions());
+
+  // 🔧 Interceptar comandos para métricas
+  const originalSendCommand = singleton.sendCommand.bind(singleton);
+  singleton.sendCommand = function (command: any, ...args: any[]) {
+    if (command && command.name) {
+      recordRedisCommand(command.name.toUpperCase());
+    }
+    return originalSendCommand(command, ...args);
+  };
 
   // Event listeners estruturados
   singleton.on("connect", () => {
@@ -433,8 +516,9 @@ function startRedisLatencyMonitor(
  * Cria configurações Redis robustas otimizadas para BullMQ
  */
 function createRedisOptions(): IORedisOptions {
-  // Preferir URL TCP direta (mais robusta)
-  const tcpUrl = process.env.UPSTASH_REDIS_URL || process.env.REDIS_URL;
+  // 🔧 PRIORIZAR REDIS_URL (usado no docker-compose local)
+  // UPSTASH_REDIS_URL só deve ser usado em produção (Railway)
+  const tcpUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL;
 
   if (tcpUrl) {
     try {
