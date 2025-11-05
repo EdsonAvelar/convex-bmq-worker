@@ -18,6 +18,7 @@ import {
   getRedisSingleton,
   waitForReady,
   pingRedisSafe,
+  getRedisMetrics,
 } from "./lib/queue/connection";
 
 // ============================================================================
@@ -681,6 +682,9 @@ function createHealthServer(port: number = 3002) {
       try {
         calculatePerformanceMetrics();
 
+        // 🔧 Obter métricas do Redis
+        const redisMetrics = getRedisMetrics();
+
         // Obter estatísticas da fila também
         const { Queue } = await import("bullmq");
         const redis = getRedisSingleton();
@@ -715,6 +719,11 @@ function createHealthServer(port: number = 3002) {
           bottlenecks.push("LOW_THROUGHPUT");
         }
 
+        // 🔧 Alertas de uso excessivo do Redis
+        if (redisMetrics.commandsPerHour > 50000) {
+          bottlenecks.push("EXCESSIVE_REDIS_COMMANDS");
+        }
+
         // Recomendações automáticas
         const recommendations: string[] = [];
         if (bottlenecks.includes("MAX_CONCURRENCY_REACHED")) {
@@ -730,6 +739,11 @@ function createHealthServer(port: number = 3002) {
         if (bottlenecks.includes("SLOW_WEBHOOK_RESPONSES")) {
           recommendations.push(
             "Check webhook endpoint performance or add timeout"
+          );
+        }
+        if (bottlenecks.includes("EXCESSIVE_REDIS_COMMANDS")) {
+          recommendations.push(
+            "Redis command rate is very high - check for polling loops or reconnection issues"
           );
         }
 
@@ -763,6 +777,23 @@ function createHealthServer(port: number = 3002) {
             completed: counts.completed,
             failed: counts.failed,
             status: counts.waiting > 50 ? "⚠️ Backlog building" : "✅ Healthy",
+          },
+
+          // 🔧 Métricas do Redis
+          redis: {
+            totalCommands: redisMetrics.totalCommands,
+            commandsPerHour: redisMetrics.commandsPerHour,
+            commandsPerSecond: redisMetrics.commandsPerSecond,
+            uptimeHours: redisMetrics.uptimeHours,
+            lastCommandAt: redisMetrics.lastCommandAt,
+            topCommands: redisMetrics.topCommands,
+            projectedDaily: Math.round(redisMetrics.commandsPerHour * 24),
+            status:
+              redisMetrics.commandsPerHour > 100000
+                ? "⚠️ Very High Usage"
+                : redisMetrics.commandsPerHour > 50000
+                ? "⚠️ High Usage"
+                : "✅ Normal",
           },
 
           // Análise de saúde
@@ -1020,8 +1051,9 @@ async function main() {
     // ✅ APP_URL não é mais obrigatória (apenas para legacy webhook logs)
     // Se não configurada, o worker funciona normalmente, apenas não salva logs antigos
 
+    // 🔧 PRIORIZAR REDIS_URL (usado no docker-compose local)
     const hasTcpRedis = Boolean(
-      process.env.UPSTASH_REDIS_URL || process.env.REDIS_URL
+      process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL
     );
     const hasRestRedis = Boolean(
       process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
