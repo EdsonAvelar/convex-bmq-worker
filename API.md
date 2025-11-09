@@ -9,6 +9,8 @@ Base URL: `http://localhost:3002/queue`
 ```bash
 # Verificar se o worker está saudável
 curl http://localhost:3002/queue/health
+# ou
+curl http://localhost:3002/health
 
 # Resposta:
 {
@@ -54,11 +56,11 @@ curl -X POST http://localhost:3002/queue/webhooks/add \
     }
   }'
 
-# Resposta:
+# Resposta (202 Accepted):
 {
   "success": true,
   "jobId": "123",
-  "message": "Webhook job added to queue"
+  "message": "Webhook job accepted for processing"
 }
 ```
 
@@ -87,6 +89,8 @@ curl http://localhost:3002/queue/webhooks/stats
 ```bash
 # Verificar se está pronto para receber jobs
 curl http://localhost:3002/queue/ready
+# ou
+curl http://localhost:3002/ready
 
 # Resposta:
 {"ready": true}
@@ -97,6 +101,8 @@ curl http://localhost:3002/queue/ready
 ```bash
 # Verificar se o processo está vivo
 curl http://localhost:3002/queue/live
+# ou
+curl http://localhost:3002/live
 
 # Resposta:
 {"alive": true}
@@ -317,6 +323,14 @@ curl http://localhost:3002/ready
 
 ```bash
 curl http://localhost:3002/live
+
+### Raiz
+
+```bash
+GET /
+
+curl http://localhost:3002/
+```
 ```
 
 ## Teste de Carga

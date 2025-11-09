@@ -18,6 +18,8 @@ import {
   getRedisSingleton,
   waitForReady,
   pingRedisSafe,
+  getRedisMetrics,
+  redisDiagnostics,
 } from "./lib/queue/connection";
 
 // ============================================================================
@@ -227,6 +229,29 @@ function createHealthServer(port: number = 3002) {
     const urlObj = new URL(req.url || "/", "http://localhost");
     const path = urlObj.pathname.replace(/\/$/, "");
 
+    // ✅ Root endpoint - /
+    if (path === "" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          service: "convex-bmq-worker",
+          status: "ok",
+          endpoints: [
+            "/health",
+            "/ready",
+            "/live",
+            "/metrics",
+            "/queue/health",
+            "/queue/ready",
+            "/queue/live",
+            "/queue/webhooks/add",
+          ],
+          timestamp: new Date().toISOString(),
+        })
+      );
+      return;
+    }
+
     // ✅ Health endpoint - /queue/health
     if (path === "/queue/health" && req.method === "GET") {
       try {
@@ -268,6 +293,27 @@ function createHealthServer(port: number = 3002) {
           JSON.stringify({
             status: "unhealthy",
             error: error instanceof Error ? error.message : String(error),
+          })
+        );
+      }
+      return;
+    }
+
+    // ✅ Health endpoint (alias) - /health
+    if (path === "/health" && req.method === "GET") {
+      try {
+        const health = await getHealthStatus();
+        const statusCode =
+          health.status === "healthy" && health.redis.connected ? 200 : 503;
+
+        res.writeHead(statusCode, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(health, null, 2));
+      } catch (error: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            status: "unhealthy",
+            error: error.message,
           })
         );
       }
@@ -330,8 +376,32 @@ function createHealthServer(port: number = 3002) {
       return;
     }
 
+    // ✅ Readiness endpoint (alias) - /ready
+    if (path === "/ready" && req.method === "GET") {
+      try {
+        const health = await getHealthStatus();
+        const isReady = health.status === "healthy" && !isShuttingDown;
+
+        res.writeHead(isReady ? 200 : 503, {
+          "Content-Type": "application/json",
+        });
+        res.end(JSON.stringify({ ready: isReady }));
+      } catch (error) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ready: false }));
+      }
+      return;
+    }
+
     // ✅ Liveness endpoint - /queue/live
     if (path === "/queue/live" && req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ alive: true }));
+      return;
+    }
+
+    // ✅ Liveness endpoint (alias) - /live
+    if (path === "/live" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ alive: true }));
       return;
@@ -594,12 +664,13 @@ function createHealthServer(port: number = 3002) {
             })
           );
 
-          res.writeHead(201, { "Content-Type": "application/json" });
+          // Return 202 Accepted to indicate asynchronous processing
+          res.writeHead(202, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
               success: true,
               jobId: job.id,
-              message: "Webhook job added to queue",
+              message: "Webhook job accepted for processing",
             })
           );
         } catch (error: any) {
@@ -681,6 +752,9 @@ function createHealthServer(port: number = 3002) {
       try {
         calculatePerformanceMetrics();
 
+        // 🔧 Obter métricas do Redis
+        const redisMetrics = getRedisMetrics();
+
         // Obter estatísticas da fila também
         const { Queue } = await import("bullmq");
         const redis = getRedisSingleton();
@@ -715,6 +789,11 @@ function createHealthServer(port: number = 3002) {
           bottlenecks.push("LOW_THROUGHPUT");
         }
 
+        // 🔧 Alertas de uso excessivo do Redis
+        if (redisMetrics.commandsPerHour > 50000) {
+          bottlenecks.push("EXCESSIVE_REDIS_COMMANDS");
+        }
+
         // Recomendações automáticas
         const recommendations: string[] = [];
         if (bottlenecks.includes("MAX_CONCURRENCY_REACHED")) {
@@ -730,6 +809,11 @@ function createHealthServer(port: number = 3002) {
         if (bottlenecks.includes("SLOW_WEBHOOK_RESPONSES")) {
           recommendations.push(
             "Check webhook endpoint performance or add timeout"
+          );
+        }
+        if (bottlenecks.includes("EXCESSIVE_REDIS_COMMANDS")) {
+          recommendations.push(
+            "Redis command rate is very high - check for polling loops or reconnection issues"
           );
         }
 
@@ -765,6 +849,23 @@ function createHealthServer(port: number = 3002) {
             status: counts.waiting > 50 ? "⚠️ Backlog building" : "✅ Healthy",
           },
 
+          // 🔧 Métricas do Redis
+          redis: {
+            totalCommands: redisMetrics.totalCommands,
+            commandsPerHour: redisMetrics.commandsPerHour,
+            commandsPerSecond: redisMetrics.commandsPerSecond,
+            uptimeHours: redisMetrics.uptimeHours,
+            lastCommandAt: redisMetrics.lastCommandAt,
+            topCommands: redisMetrics.topCommands,
+            projectedDaily: Math.round(redisMetrics.commandsPerHour * 24),
+            status:
+              redisMetrics.commandsPerHour > 100000
+                ? "⚠️ Very High Usage"
+                : redisMetrics.commandsPerHour > 50000
+                ? "⚠️ High Usage"
+                : "✅ Normal",
+          },
+
           // Análise de saúde
           health: {
             bottlenecks: bottlenecks.length > 0 ? bottlenecks : ["NONE"],
@@ -796,6 +897,30 @@ function createHealthServer(port: number = 3002) {
         res.end(
           JSON.stringify({
             error: "Failed to get metrics",
+            message: error.message,
+          })
+        );
+      }
+      return;
+    }
+
+    // ✅ GET /redis/diagnostics - Diagnóstico detalhado de conexão Redis
+    if (path === "/redis/diagnostics" && req.method === "GET") {
+      try {
+        const diag = await redisDiagnostics();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify(
+            { timestamp: new Date().toISOString(), ...diag },
+            null,
+            2
+          )
+        );
+      } catch (error: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: "diagnostics_failed",
             message: error.message,
           })
         );
@@ -1020,8 +1145,9 @@ async function main() {
     // ✅ APP_URL não é mais obrigatória (apenas para legacy webhook logs)
     // Se não configurada, o worker funciona normalmente, apenas não salva logs antigos
 
+    // 🔧 PRIORIZAR REDIS_URL (usado no docker-compose local)
     const hasTcpRedis = Boolean(
-      process.env.UPSTASH_REDIS_URL || process.env.REDIS_URL
+      process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL
     );
     const hasRestRedis = Boolean(
       process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN

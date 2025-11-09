@@ -59,7 +59,7 @@ export abstract class BaseWorker<T extends BaseJobData> {
         },
         redis_clients: {
           normal_client: "singleton",
-          blocking_client: "created_with_commandTimeout_0",
+          blocking_client: "dedicated_with_commandTimeout_0_lazy_connect",
         },
       })
     );
@@ -78,18 +78,8 @@ export abstract class BaseWorker<T extends BaseJobData> {
       );
     });
 
-    waitForReady(this.blockingClient).catch((err) => {
-      console.error(
-        JSON.stringify({
-          timestamp: new Date().toISOString(),
-          level: "error",
-          service: "worker",
-          event: "blocking_client_ready_failed",
-          queue: queueName,
-          error: err.message,
-        })
-      );
-    });
+    // Não aguardamos explicitamente o blocking client.
+    // Deixamos o BullMQ gerenciar a conexão bloqueante para evitar timeouts prematuros.
 
     // ✅ Usar singleton para connection E blocking client dedicado nas OPTIONS
     this.worker = new Worker<T>(
